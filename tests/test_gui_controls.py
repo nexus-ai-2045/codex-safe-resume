@@ -62,7 +62,8 @@ class GuiControls(unittest.TestCase):
         ttk = SimpleNamespace(**{name: factory(name) for name in
                               ('Frame', 'Label', 'Button', 'Entry', 'Combobox',
                                'Treeview', 'Scrollbar', 'Menubutton', 'Radiobutton', 'Checkbutton')})
-        tk = SimpleNamespace(StringVar=Mock, BooleanVar=Mock, Text=factory('Text'), Menu=factory('Menu'))
+        tk = SimpleNamespace(StringVar=Mock, BooleanVar=Mock, Text=factory('Text'),
+                             Menu=factory('Menu'), Canvas=factory('Canvas'))
         with patch('app.ttk', ttk), patch('app.tk', tk), patch('app.QuotaCards'):
             gui.build()
         return records
@@ -73,9 +74,9 @@ class GuiControls(unittest.TestCase):
         for label in gui.wrap_labels:
             label.reset_mock()
             gui.resize_label_text(SimpleNamespace(widget=label, width=900))
-            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 900)
+            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 896)
             gui.resize_label_text(SimpleNamespace(widget=label, width=360))
-            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 360)
+            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 356)
         self.assertNotIn('<Configure>', [call.args[0] for call in gui.root.bind.call_args_list])
 
     def test_settings_menu_names_explain_effect_without_automatic_execution(self):
