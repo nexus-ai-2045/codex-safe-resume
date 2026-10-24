@@ -268,6 +268,10 @@ class GUI:
         self.usage_running = False
         self.usage_thread = None
         self.usage_queue = queue.Queue(maxsize=1)
+        self.navigation_pending = False
+        self.navigation_thread = None
+        self.navigation_cancel = threading.Event()
+        self.navigation_results = queue.Queue(maxsize=1)
         self.queue_setup_running = False
         self.queue_setup_thread = None
         self.queue_setup_results = queue.Queue(maxsize=1)
@@ -401,7 +405,7 @@ class GUI:
                                        '自動再開をOFF' if policy['enabled'] else '自動再開をON')
 
     def show_review_targets(self):
-        self.view_filter.set('要確認')
+        self.view_filter.set('確認が必要')
         self.search.set('')
         self.filter.set('すべて')
         self.render_rows()
@@ -809,7 +813,7 @@ class GUI:
         body.columnconfigure(0, weight=1)
         body.rowconfigure(2, weight=1, minsize=80)
         self.wrap_labels = []
-        top = ttk.Frame(body, style='Main.TFrame', padding=(16, 8, 16, 4))
+        top = ttk.Frame(body, style='Main.TFrame', padding=(16, 8, 16, 2))
         top.grid(row=0, column=0, sticky='ew')
         top.columnconfigure(0, weight=1)
         ttk.Label(top, text='Codex Safe Resume', style='Heading.TLabel').grid(row=0, column=0, sticky='w')
@@ -818,19 +822,9 @@ class GUI:
         details_button = ttk.Menubutton(top, text='設定')
         details_button.grid(row=0, column=2, padx=(8, 0))
         details_menu = tk.Menu(details_button, tearoff=False)
-        details_menu.add_command(label='詳細表示（プロジェクト・並べ替え）', command=self.toggle_details)
-        details_menu.add_command(label='再開用の接続状態を確認…', command=self.reconnect_auto_watch)
-        details_menu.add_command(label='接続設定を確認・変更…', command=self.setup_connection)
+        details_menu.add_command(label='接続を確認・再設定（同意が必要）…', command=self.reconnect_auto_watch)
         details_menu.add_command(label='利用枠の詳細（送信しない）', command=self.show_usage_details)
         details_menu.add_command(label='一覧と利用枠を再取得（送信しない）', command=self.refresh_all)
-        details_menu.add_separator()
-        details_menu.add_command(label='チャット別の操作', state='disabled')
-        details_menu.add_command(label='実行・監視中を上に戻す', command=self.prioritize_active)
-        details_menu.add_command(label='選択したチャットだけON', command=lambda: self.toggle(True))
-        details_menu.add_command(label='完了として記録（監視を終了）', command=lambda: self.finish('completed'))
-        details_menu.add_command(label='要確認として記録（自動再開を停止）', command=lambda: self.finish('blocked'))
-        details_menu.add_command(label='確認して選び直す（試行履歴は保持）', command=self.review_reset)
-        details_menu.add_command(label='詳細情報（ID・場所）', command=self.show_technical_details)
         details_menu.add_separator()
         details_menu.add_command(label='アプリを終了', command=self.quit_app)
         details_button.configure(menu=details_menu)
@@ -864,6 +858,7 @@ class GUI:
                              textvariable=self.sort_choice, values=tuple(self.sort_options()))
         order.pack(side='left')
         order.bind('<<ComboboxSelected>>', self.apply_sort_choice)
+        ttk.Button(order_bar, text='実行・監視中を上に戻す', command=self.prioritize_active).pack(side='left', padx=8)
         ttk.Label(order_bar, text='列名のクリックでも変更できます', style='Sub.TLabel').pack(side='left', padx=8)
 
         bar = ttk.Frame(top, style='Main.TFrame', padding=(0, 4, 0, 4))
@@ -877,10 +872,17 @@ class GUI:
 
         views = ttk.Frame(body, style='Main.TFrame', padding=(16, 2))
         views.grid(row=1, column=0, sticky='ew')
-        self.view_filter = tk.StringVar(value='再開待ち')
-        for index, label in enumerate(('再開待ち', '要確認', 'すべて')):
+        self.view_filter = tk.StringVar(value='すべて')
+        for index, label in enumerate(('すべて', '解除待ち・再開中', '確認が必要')):
             ttk.Radiobutton(views, text=label, value=label, variable=self.view_filter,
                             command=self.render_rows).grid(row=0, column=index, padx=(0, 10))
+
+        ttk.Button(views, text='詳細表示（プロジェクト・並べ替え）', command=self.toggle_details).grid(
+            row=0, column=3, sticky='e')
+        scope_note = ttk.Label(views, text='すべて：現在検出済みの通常チャットです。全履歴ではありません。',
+                               style='Sub.TLabel', wraplength=580)
+        scope_note.grid(row=1, column=0, columnspan=4, sticky='ew')
+        self.wrap_labels.append(scope_note)
 
         table = ttk.Frame(body, style='Panel.TFrame', padding=1)
         table.grid(row=2, column=0, sticky='nsew', padx=16)
@@ -907,13 +909,14 @@ class GUI:
         vertical.grid(row=0, column=1, sticky='ns')
         horizontal.grid(row=1, column=0, sticky='ew')
         self.tree.bind('<<TreeviewSelect>>', self.select_row)
+        self.tree.bind('<Double-1>', self.open_selected_chat)
         if getattr(self, 'simple_mode', True):
             self.tree.configure(displaycolumns=('title', 'auto', 'status', 'reset'))
 
         detail = ttk.Label(body, textvariable=self.details, style='Sub.TLabel', wraplength=580, justify='left')
         detail.grid(row=3, column=0, sticky='ew', padx=16, pady=4)
         self.wrap_labels.append(detail)
-        target_panel = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 4))
+        target_panel = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 2))
         target_panel.grid(row=4, column=0, sticky='ew')
         target_panel.columnconfigure(0, weight=1)
         self.target_included = tk.BooleanVar(value=False)
@@ -924,8 +927,19 @@ class GUI:
         self.target_toggle.state(['disabled'])
         target_note = ttk.Label(target_panel, textvariable=self.target_reason,
                                 style='Sub.TLabel', wraplength=580)
-        target_note.grid(row=1, column=0, sticky='ew')
+        target_note.grid(row=1, column=0, columnspan=3, sticky='ew')
         self.wrap_labels.append(target_note)
+        selected_actions = ttk.Menubutton(target_panel, text='選択チャットの操作')
+        selected_actions.grid(row=0, column=1, sticky='e', padx=(8, 0))
+        selected_menu = tk.Menu(selected_actions, tearoff=False)
+        selected_menu.add_command(label='選択したチャットを対象にする', command=lambda: self.toggle(True))
+        selected_menu.add_command(label='完了として記録（監視を終了）', command=lambda: self.finish('completed'))
+        selected_menu.add_command(label='要確認として記録（自動再開を停止）', command=lambda: self.finish('blocked'))
+        selected_menu.add_command(label='確認して選び直す（試行履歴は保持）', command=self.review_reset)
+        selected_menu.add_command(label='詳細情報（ID・場所）', command=self.show_technical_details)
+        selected_actions.configure(menu=selected_menu)
+        self.navigation_button = ttk.Button(target_panel, text='Codexで開く', command=self.open_selected_chat)
+        self.navigation_button.grid(row=0, column=2, padx=(8, 0), sticky='e')
         footer = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 4))
         footer.grid(row=6, column=0, sticky='ew')
         footer.columnconfigure(0, weight=1)
@@ -1134,7 +1148,7 @@ class GUI:
         live = {x['id']: x for x in self.known}
         simple = getattr(self, 'simple_mode', False)
         query = '' if simple else self.search.get().casefold().strip()
-        view = self.view_filter.get() if hasattr(self, 'view_filter') else ('再開待ち' if simple else 'すべて')
+        view = self.view_filter.get() if hasattr(self, 'view_filter') else 'すべて'
         mode = 'すべて' if simple else self.filter.get()
         config = connection_options(self.db) if config is None else config
         self.refresh_auto_status(config=config)
@@ -1144,9 +1158,9 @@ class GUI:
             if not self.is_visible_row(row, live):
                 continue
             t = live[row['id']]
-            if view == '再開待ち' and not (t.get('limited') or row['state'] in ('waiting', 'claimed', 'dispatched', 'monitoring')):
+            if view == '解除待ち・再開中' and row['state'] not in ('waiting', 'claimed', 'dispatched', 'monitoring'):
                 continue
-            if view == '要確認' and row['state'] != 'blocked':
+            if view == '確認が必要' and row['state'] != 'blocked':
                 continue
             title = row['title'] or '(タイトルなし)'
             project = pathlib.Path(row['cwd']).name if row['cwd'] else '—'
@@ -1180,7 +1194,7 @@ class GUI:
             return '実行中（読取候補）'
         if observed.get('limited'):
             return '利用枠停止の候補'
-        return '待機中'
+        return '再開処理なし'
 
     @staticmethod
     def reset_text(row, observed, configured):
@@ -1434,6 +1448,77 @@ class GUI:
         project = project[:23] + '…' if len(project) > 24 else project
         self.details.set(f'選択: {title}  |  {project}')
 
+    def open_selected_chat(self, event=None):
+        thread = getattr(self, 'navigation_thread', None)
+        if (self.closing or getattr(self, 'navigation_pending', False)
+                or thread is not None and thread.is_alive()):
+            return 'break' if event is not None else None
+        if event is not None:
+            if self.tree.identify_region(event.x, event.y) not in ('cell', 'tree'):
+                return 'break'
+            tid = self.tree.identify_row(event.y)
+            if not tid or not any(row['id'] == tid for row in self.rows):
+                return 'break'
+            self.tree.selection_set(tid)
+            self.select_row()
+        else:
+            tid = self.require_selected()
+            if not tid:
+                return
+        self.navigation_cancel = threading.Event()
+        self.navigation_results = queue.Queue(maxsize=1)
+        self.navigation_pending = True
+        self.navigation_button.configure(state='disabled')
+        cancelled, results = self.navigation_cancel, self.navigation_results
+
+        def worker():
+            outcome = 'failed'
+            try:
+                from thread_navigation import open_thread
+                def before_open():
+                    return not cancelled.is_set() and not self.closing
+                if before_open():
+                    open_thread(tid, before_open=before_open)
+                    outcome = 'requested' if before_open() else 'cancelled'
+                else:
+                    outcome = 'cancelled'
+            except Exception:
+                # Expected navigation errors and unexpected worker failures share a
+                # fixed user message; private paths and diagnostics stay out of Tk.
+                outcome = 'cancelled' if cancelled.is_set() else 'failed'
+            finally:
+                results.put_nowait(outcome)
+
+        self.navigation_thread = threading.Thread(target=worker, daemon=False, name='thread-navigation')
+        try:
+            self.navigation_thread.start()
+        except Exception:
+            self.navigation_results.put_nowait('failed')
+        self.root.after(100, self.drain_navigation)
+        return 'break' if event is not None else None
+
+    def drain_navigation(self):
+        if not getattr(self, 'navigation_pending', False):
+            return
+        if self.closing:
+            self.navigation_cancel.set()
+            return
+        if self.navigation_thread.is_alive():
+            self.root.after(100, self.drain_navigation)
+            return
+        try:
+            outcome = self.navigation_results.get_nowait()
+        except queue.Empty:
+            outcome = 'failed'
+        self.navigation_pending = False
+        self.navigation_button.configure(state='normal')
+        if outcome == 'requested':
+            self.write('Codexに元のチャットを開くよう要求しました。')
+        elif outcome == 'failed':
+            messagebox.showwarning('チャットを開けません',
+                                   'Codexに元のチャットを開く要求を渡せませんでした。Codexの状態を確認してください。',
+                                   parent=self.root)
+
     def show_technical_details(self):
         tid = self.require_selected()
         if not tid:
@@ -1681,26 +1766,36 @@ class GUI:
     def quit_app(self):
         if self.closing: return
         self.closing = True
+        cancelled = getattr(self, 'navigation_cancel', None)
+        if cancelled is not None:
+            cancelled.set()
         try:
             set_auto_watch(self.db, False)
         except Exception:
             self.hold_quit('停止設定を保存できません。アプリは終了していません。')
             return
+        self.root.title('Codex Safe Resume（終了処理中）')
+        for name in ('auto_status', 'status'):
+            variable = getattr(self, name, None)
+            if variable is not None:
+                variable.set('終了処理中：自動再開はOFFです。処理結果を確認しています。')
         self.shutdown_started = False
         self.finish_quit()
 
     def hold_quit(self, message):
         self.closing = False
+        self.root.title('Codex Safe Resume')
         self.show_window()
         self.write(message)
         if hasattr(self, 'auto_status'):
             self.auto_status.set('要確認：終了前の送信状態を確認してください')
         for method in ('monitor_tick', 'drain_monitor', 'usage_tick', 'drain_usage',
-                       'periodic', 'display_tick', 'poll_desktop_connection', 'drain_tray_actions'):
+                       'periodic', 'display_tick', 'poll_desktop_connection', 'drain_tray_actions',
+                       'drain_navigation'):
             self.root.after(1000, getattr(self, method))
 
     def finish_quit(self):
-        for name in ('monitor_thread', 'usage_thread', 'queue_setup_thread', 'shutdown_thread'):
+        for name in ('monitor_thread', 'usage_thread', 'queue_setup_thread', 'navigation_thread', 'shutdown_thread'):
             thread = getattr(self, name, None)
             if thread is not None and thread.is_alive():
                 self.root.after(100, self.finish_quit)

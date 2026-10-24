@@ -13,6 +13,10 @@ class SmallWindowLayout(unittest.TestCase):
             self.root = tk.Tk()
         except tk.TclError as exc:
             self.skipTest(str(exc))
+        # Keep real mapped Tk geometry, without placing test windows over user work.
+        self.root.withdraw()
+        self.root.overrideredirect(True)
+        self.root.attributes('-alpha', 0.0)
         self.addCleanup(self.root.destroy)
         self.root.title('Safe Resume layout regression')
         self.gui = app.GUI.__new__(app.GUI)
@@ -34,7 +38,10 @@ class SmallWindowLayout(unittest.TestCase):
             for key, name in (('primary', '5時間枠'), ('secondary', '1週間枠'))]))
 
     def settle(self, width, height):
-        self.root.geometry(f'{width}x{height}+30+30')
+        x, y = self.root.winfo_screenwidth() + 100, self.root.winfo_screenheight() + 100
+        self.root.geometry(f'{width}x{height}+{x}+{y}')
+        if self.root.state() == 'withdrawn':
+            self.root.deiconify()
         self.flush()
 
     def flush(self):
@@ -84,6 +91,11 @@ class SmallWindowLayout(unittest.TestCase):
                         viewport.canvas.yview_moveto(1)
                         self.flush()
                     self.assert_visible(self.gui.target_toggle)
+                    self.assert_visible(self.gui.navigation_button)
+                    for control in (self.gui.target_toggle, self.gui.navigation_button):
+                        left = control.winfo_rootx() - viewport.canvas.winfo_rootx()
+                        self.assertGreaterEqual(left, 0)
+                        self.assertLessEqual(left + control.winfo_width(), viewport.canvas.winfo_width())
                     footer = self.gui.target_toggle.master.master.grid_slaves(row=6)[0]
                     self.assert_visible(footer)
 

@@ -164,14 +164,14 @@ class Dashboard(unittest.TestCase):
             self.assertFalse(row['enabled'])
             self.assertEqual([tuple(r)for r in self.gui.db.execute('SELECT * FROM attempts')],before)
 
-    def test_default_tab_hides_unrelated_running_chat_but_all_can_show_it(self):
-        stopped = self.fixture.add(1, '停止', limited=True)
+    def test_all_shows_running_chat_and_pending_filter_keeps_only_resume_work(self):
+        stopped = self.fixture.add(1, '停止', limited=True, state='waiting')
         running = self.fixture.add(2, '作業中', turn_status='inProgress')
         self.gui.simple_mode = True
-        self.gui.view_filter = Mock(); self.gui.view_filter.get.return_value = '再開待ち'
-        self.gui.render_rows(); self.assertEqual(self.fixture.order(), [stopped])
-        self.gui.tree.insert.reset_mock(); self.gui.view_filter.get.return_value = 'すべて'
+        self.gui.view_filter = Mock(); self.gui.view_filter.get.return_value = 'すべて'
         self.gui.render_rows(); self.assertEqual(set(self.fixture.order()),{stopped,running})
+        self.gui.tree.insert.reset_mock(); self.gui.view_filter.get.return_value = '解除待ち・再開中'
+        self.gui.render_rows(); self.assertEqual(self.fixture.order(), [stopped])
 
     def test_monitoring_label_requires_matching_fresh_monitor_receipt(self):
         gui = self.gui
