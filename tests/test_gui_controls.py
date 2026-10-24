@@ -40,6 +40,7 @@ class GuiControls(unittest.TestCase):
 
     def gui(self):
         gui = app.GUI.__new__(app.GUI)
+        gui.closing, gui.tray, gui.window_hidden = False, None, False
         gui.root = Mock()
         gui.root.winfo_screenwidth.return_value = 800
         gui.root.winfo_screenheight.return_value = 600
@@ -306,6 +307,10 @@ class FakeIcon:
         self.run_called = threading.Event()
         self.exit_run = threading.Event()
         self.run_thread = None
+        self.menu_updates = 0
+
+    def update_menu(self):
+        self.menu_updates += 1
 
     def run_detached(self, setup=None):
         self.setup = setup
@@ -459,6 +464,7 @@ class TrayControls(unittest.TestCase):
     def test_tray_menu_enqueues_without_entering_tcl_from_native_callback(self):
         gui, icon = self.gui(), FakeIcon()
         pystray = self.start(gui, icon, 'darwin')
+        gui.root.state.return_value = 'withdrawn'
         gui.root.reset_mock()
         pystray.MenuItem.call_args_list[0].args[1](None, None)
         self.assertEqual(gui.root.mock_calls, [])
@@ -469,6 +475,7 @@ class TrayControls(unittest.TestCase):
     def test_worker_tray_callback_does_not_touch_tk(self):
         gui, icon = self.gui(), FakeIcon()
         pystray = self.start(gui, icon, 'win32')
+        gui.root.state.return_value = 'withdrawn'
         gui.root.reset_mock()
         worker = threading.Thread(target=pystray.MenuItem.call_args_list[0].args[1],
                                   args=(None, None))
@@ -478,6 +485,54 @@ class TrayControls(unittest.TestCase):
         self.assertEqual(gui.root.mock_calls, [])
         gui.drain_tray_actions()
         gui.root.deiconify.assert_called_once()
+
+    def test_tray_label_and_action_follow_hide_restore_and_minimize(self):
+        gui, icon = self.gui(), FakeIcon()
+        gui.root.state.return_value = 'normal'
+        gui.root.withdraw.side_effect = lambda: setattr(gui.root.state, 'return_value', 'withdrawn')
+        gui.root.deiconify.side_effect = lambda: setattr(gui.root.state, 'return_value', 'normal')
+        pystray = self.start(gui, icon, 'darwin')
+        label, action = pystray.MenuItem.call_args_list[0].args[:2]
+        self.assertEqual(label(None), 'トレイにしまう')
+        gui.root.reset_mock()
+        action(None, None)
+        self.assertEqual(gui.root.mock_calls, [])
+        gui.drain_tray_actions()
+        gui.root.withdraw.assert_called_once()
+        self.assertEqual(label(None), 'ウィンドウを開く')
+        self.assertEqual(icon.menu_updates, 1)
+        action(None, None)
+        gui.drain_tray_actions()
+        gui.root.deiconify.assert_called_once()
+        self.assertEqual(label(None), 'トレイにしまう')
+        self.assertEqual(icon.menu_updates, 2)
+        gui.root.state.return_value = 'iconic'
+        gui.sync_tray_window(SimpleNamespace(widget=gui.root))
+        self.assertEqual(label(None), 'ウィンドウを開く')
+
+    def test_native_label_reader_never_calls_tk(self):
+        gui, icon = self.gui(), FakeIcon()
+        gui.root.state.return_value = 'normal'
+        pystray = self.start(gui, icon, 'darwin')
+        label = pystray.MenuItem.call_args_list[0].args[0]
+        gui.root.reset_mock()
+        values = []
+        worker = threading.Thread(target=lambda: values.append(label(None)))
+        worker.start()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(values, ['トレイにしまう'])
+        self.assertEqual(gui.root.mock_calls, [])
+
+    def test_child_unmap_does_not_change_tray_label(self):
+        gui, icon = self.gui(), FakeIcon()
+        pystray = self.start(gui, icon, 'darwin')
+        label = pystray.MenuItem.call_args_list[0].args[0]
+        gui.root.reset_mock()
+        gui.sync_tray_window(SimpleNamespace(widget=object()))
+        self.assertEqual(gui.root.mock_calls, [])
+        self.assertEqual(label(None), 'トレイにしまう')
+        self.assertEqual(icon.menu_updates, 0)
 
     def test_queued_tray_actions_are_discarded_after_close(self):
         gui, icon = self.gui(), FakeIcon()

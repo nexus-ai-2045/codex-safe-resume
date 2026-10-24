@@ -200,6 +200,7 @@ class GUI:
         self.rows = []
         self.tray = None
         self.tray_available = False
+        self.window_hidden = False
         self.closing = False
         self.monitor_queue = queue.Queue()
         self.monitor_running = False
@@ -227,6 +228,8 @@ class GUI:
         self.filter.trace_add('write', lambda *_: self.render_rows())
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
         self.configure_reopen()
+        self.root.bind('<Map>', self.sync_tray_window, add='+')
+        self.root.bind('<Unmap>', self.sync_tray_window, add='+')
         self.refresh()
         self.show_window()
         if enable_tray:
@@ -1455,12 +1458,15 @@ class GUI:
             self.write('常駐アイコンを開始できません。画面を表示したまま使えます。')
             return
         pystray, Image, ImageDraw = deps
+        self.window_hidden = self.root.state() in ('withdrawn', 'iconic')
         def callback(func):
             # Native AppKit callbacks must not enter Tcl, even via after().
             # Windows callbacks can also arrive on the tray worker thread.
             return lambda icon, item: self.tray_actions.put(func)
         menu = pystray.Menu(
-            pystray.MenuItem('ウィンドウを開く', callback(self.show_window), default=True),
+            # Native text callbacks may run outside Tk's event loop.
+            pystray.MenuItem(lambda item: 'ウィンドウを開く' if self.window_hidden else 'トレイにしまう',
+                             callback(self.toggle_tray_window), default=True),
             pystray.MenuItem('一覧を更新', callback(self.refresh)),
             pystray.MenuItem('終了', callback(self.quit_app)),
         )
@@ -1559,10 +1565,32 @@ class GUI:
         self.show_window()
         self.write('常駐アイコンを利用できません。画面を表示したままにします。')
 
+    def sync_tray_window(self, event=None):
+        if self.closing or (event is not None and event.widget is not self.root):
+            return
+        hidden = self.root.state() in ('withdrawn', 'iconic')
+        if hidden == getattr(self, 'window_hidden', False):
+            return
+        self.window_hidden = hidden
+        if self.tray is not None:
+            try:
+                self.tray.update_menu()
+            except Exception:
+                self.write('常駐メニューの表示を更新できません。')
+
+    def toggle_tray_window(self):
+        if self.closing:
+            return
+        if self.root.state() in ('withdrawn', 'iconic'):
+            self.show_window()
+        else:
+            self.on_close()
+
     def show_window(self):
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        self.sync_tray_window()
 
     def on_close(self):
         if self.closing:
@@ -1575,6 +1603,7 @@ class GUI:
             visible = False
         if visible:
             self.root.withdraw()
+            self.sync_tray_window()
         elif self.tray_requested:
             self.tray_available = False
             self.show_window()
