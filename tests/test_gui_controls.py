@@ -287,12 +287,24 @@ class GuiControls(unittest.TestCase):
         self.assertNotIn('/private/parent', text)
         self.assertIn('タイトル', text)
 
+    def test_mac_native_quit_uses_guarded_shutdown(self):
+        gui = self.gui()
+        gui.quit_app = Mock()
+        with patch('app.sys.platform', 'darwin'):
+            gui.configure_reopen()
+        callbacks = {item.args[0]: item.args[1] for item in gui.root.createcommand.call_args_list}
+        self.assertIn('tk::mac::Quit', callbacks)
+        callbacks['tk::mac::Quit']()
+        gui.quit_app.assert_called_once_with()
+
     def test_dock_reopen_restores_existing_window(self):
         gui = self.gui()
         with patch('app.sys.platform', 'darwin'):
             gui.configure_reopen()
-        gui.root.createcommand.assert_called_once_with('tk::mac::ReopenApplication', gui.show_window)
-        gui.root.createcommand.call_args.args[1]()
+        gui.root.createcommand.assert_has_calls([
+            call('tk::mac::ReopenApplication', gui.show_window),
+            call('tk::mac::Quit', gui.quit_app)])
+        gui.root.createcommand.call_args_list[0].args[1]()
         gui.root.deiconify.assert_called_once()
         gui.root.lift.assert_called_once()
 

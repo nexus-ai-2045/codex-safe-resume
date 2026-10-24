@@ -604,6 +604,7 @@ class GUI:
     def configure_reopen(self):
         if sys.platform == 'darwin':
             self.root.createcommand('tk::mac::ReopenApplication', self.show_window)
+            self.root.createcommand('tk::mac::Quit', self.quit_app)
 
     def tray_location(self):
         return 'メニューバー' if sys.platform == 'darwin' else 'タスクトレイ'
