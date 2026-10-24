@@ -186,6 +186,47 @@ def usage_view_text(view):
     return '\n'.join(lines + [view['availability_text'], view['updated_text']])
 
 
+class ScrollViewport:
+    def __init__(self, root):
+        self.canvas = tk.Canvas(root, background='#F3F6FA', highlightthickness=0,
+                                borderwidth=0)
+        self.scrollbar = ttk.Scrollbar(root, orient='vertical',
+                                       command=self.canvas.yview, takefocus=True)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.grid(row=0, column=0, sticky='nsew')
+        self.scrollbar.grid(row=0, column=1, sticky='ns')
+        self.body = ttk.Frame(self.canvas, style='Main.TFrame')
+        self.content = self.canvas.create_window(0, 0, window=self.body, anchor='nw')
+        self.canvas.bind('<Configure>', self.resize, add='+')
+        self.body.bind('<Configure>', self.resize, add='+')
+        root.bind('<FocusIn>', self.focus_changed, add='+')
+
+    def resize(self, _event=None):
+        width = max(1, self.canvas.winfo_width())
+        height = max(self.canvas.winfo_height(), self.body.winfo_reqheight())
+        self.canvas.itemconfigure(self.content, width=width, height=height)
+        self.canvas.configure(scrollregion=(0, 0, width, height))
+
+    def focus_changed(self, event):
+        self.ensure_visible(event.widget)
+
+    def ensure_visible(self, widget):
+        ancestor = widget
+        while ancestor is not None and ancestor is not self.body:
+            ancestor = getattr(ancestor, 'master', None)
+        if ancestor is None:
+            return
+        top = widget.winfo_rooty() - self.body.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        first = self.canvas.canvasy(0)
+        visible = self.canvas.winfo_height()
+        height = self.body.winfo_height()
+        if top < first:
+            self.canvas.yview_moveto(top / max(1, height))
+        elif bottom > first + visible:
+            self.canvas.yview_moveto((bottom - visible) / max(1, height))
+
+
 class GUI:
     def __init__(self, enable_tray=True):
         if tk is None:
@@ -742,9 +783,13 @@ class GUI:
 
     def build(self):
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=1, minsize=80)
+        self.root.rowconfigure(0, weight=1)
+        self.viewport = ScrollViewport(self.root)
+        body = self.viewport.body
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1, minsize=80)
         self.wrap_labels = []
-        top = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 8, 16, 4))
+        top = ttk.Frame(body, style='Main.TFrame', padding=(16, 8, 16, 4))
         top.grid(row=0, column=0, sticky='ew')
         top.columnconfigure(0, weight=1)
         ttk.Label(top, text='Codex Safe Resume', style='Heading.TLabel').grid(row=0, column=0, sticky='w')
@@ -810,14 +855,14 @@ class GUI:
                      textvariable=self.filter).grid(row=0, column=2, padx=(0, 8))
         ttk.Button(bar, text='一覧・利用枠を更新', command=self.refresh_all).grid(row=0, column=3)
 
-        views = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 2))
+        views = ttk.Frame(body, style='Main.TFrame', padding=(16, 2))
         views.grid(row=1, column=0, sticky='ew')
         self.view_filter = tk.StringVar(value='再開待ち')
         for index, label in enumerate(('再開待ち', '要確認', 'すべて')):
             ttk.Radiobutton(views, text=label, value=label, variable=self.view_filter,
                             command=self.render_rows).grid(row=0, column=index, padx=(0, 10))
 
-        table = ttk.Frame(self.root, style='Panel.TFrame', padding=1)
+        table = ttk.Frame(body, style='Panel.TFrame', padding=1)
         table.grid(row=2, column=0, sticky='nsew', padx=16)
         table.columnconfigure(0, weight=1)
         table.rowconfigure(0, weight=1)
@@ -845,10 +890,10 @@ class GUI:
         if getattr(self, 'simple_mode', True):
             self.tree.configure(displaycolumns=('title', 'auto', 'status', 'reset'))
 
-        detail = ttk.Label(self.root, textvariable=self.details, style='Sub.TLabel', wraplength=580, justify='left')
+        detail = ttk.Label(body, textvariable=self.details, style='Sub.TLabel', wraplength=580, justify='left')
         detail.grid(row=3, column=0, sticky='ew', padx=16, pady=4)
         self.wrap_labels.append(detail)
-        target_panel = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 0, 16, 4))
+        target_panel = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 4))
         target_panel.grid(row=4, column=0, sticky='ew')
         target_panel.columnconfigure(0, weight=1)
         self.target_included = tk.BooleanVar(value=False)
@@ -861,14 +906,14 @@ class GUI:
                                 style='Sub.TLabel', wraplength=580)
         target_note.grid(row=1, column=0, sticky='ew')
         self.wrap_labels.append(target_note)
-        footer = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 0, 16, 4))
+        footer = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 4))
         footer.grid(row=6, column=0, sticky='ew')
         footer.columnconfigure(0, weight=1)
         for row, variable in enumerate((self.status, self.tray_state)):
             label = ttk.Label(footer, textvariable=variable, style='Sub.TLabel', wraplength=580, justify='left')
             label.grid(row=row, column=0, sticky='ew')
             self.wrap_labels.append(label)
-        self.log = tk.Text(self.root, height=1, wrap='word', relief='flat', background='#EAF0F6',
+        self.log = tk.Text(body, height=1, wrap='word', relief='flat', background='#EAF0F6',
                            foreground='#344A61', font=('TkDefaultFont', 9))
         self.log.grid(row=7, column=0, sticky='ew', padx=16, pady=(0, 6))
         self.log.configure(state='disabled')
@@ -884,7 +929,9 @@ class GUI:
     def resize_label_text(self, event):
         # Use allocated label geometry, not transient native-window Configure sizes.
         if event.widget in self.wrap_labels and event.width > 1:
-            event.widget.configure(wraplength=event.width)
+            width = max(1, event.width - 4)
+            if str(event.widget.cget('wraplength')) != str(width):
+                event.widget.configure(wraplength=width)
 
     @staticmethod
     def sort_options():
