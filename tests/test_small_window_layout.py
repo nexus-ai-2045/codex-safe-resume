@@ -1,6 +1,7 @@
 import tkinter as tk
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import app
@@ -109,3 +110,38 @@ class SmallWindowLayout(unittest.TestCase):
         self.gui.target_toggle.event_generate('<FocusIn>')
         self.flush()
         self.assert_visible(self.gui.target_toggle)
+        self.gui.viewport.canvas.yview_moveto(0)
+        self.flush()
+        self.assertEqual(self.gui.viewport.canvas.yview()[0], 0)
+
+    def test_pending_focus_update_ignores_destroyed_control(self):
+        self.settle(620, 420)
+        failures = []
+        self.root.report_callback_exception = lambda *args: failures.append(args)
+        control = tk.Button(self.gui.viewport.body, text='試験用')
+        self.gui.viewport.focus_target = control
+        self.gui.viewport.layout_size = None
+        self.gui.viewport.resize()
+        control.destroy()
+        self.flush()
+        self.assertEqual(failures, [])
+
+    def test_vertical_resize_keeps_focused_control_visible(self):
+        self.settle(620, 620)
+        self.gui.target_toggle.event_generate('<FocusIn>')
+        self.flush()
+        self.assert_visible(self.gui.target_toggle)
+        self.settle(620, 420)
+        self.assert_visible(self.gui.target_toggle)
+
+    def test_pending_update_uses_current_focus(self):
+        self.settle(620, 420)
+        viewport = self.gui.viewport
+        viewport.ensure_visible = Mock()
+        viewport.focus_target = self.gui.auto_button
+        viewport.layout_size = None
+        viewport.resize()
+        viewport.focus_changed(SimpleNamespace(widget=self.gui.target_toggle))
+        self.flush()
+        self.assertEqual(viewport.ensure_visible.call_args.args,
+                         (self.gui.target_toggle,))

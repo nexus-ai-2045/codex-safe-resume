@@ -188,6 +188,9 @@ def usage_view_text(view):
 
 class ScrollViewport:
     def __init__(self, root):
+        self.focus_target = None
+        self.focus_update = None
+        self.layout_size = None
         self.canvas = tk.Canvas(root, background='#F3F6FA', highlightthickness=0,
                                 borderwidth=0)
         self.scrollbar = ttk.Scrollbar(root, orient='vertical',
@@ -203,11 +206,25 @@ class ScrollViewport:
 
     def resize(self, _event=None):
         width = max(1, self.canvas.winfo_width())
-        height = max(self.canvas.winfo_height(), self.body.winfo_reqheight())
+        visible = self.canvas.winfo_height()
+        height = max(visible, self.body.winfo_reqheight())
+        if self.layout_size == (width, height, visible):
+            return
+        self.layout_size = (width, height, visible)
         self.canvas.itemconfigure(self.content, width=width, height=height)
         self.canvas.configure(scrollregion=(0, 0, width, height))
+        # Wrapping can change the focused control's position after FocusIn.
+        # Restore visibility when dimensions settle, not on manual scrolling.
+        if self.focus_target is not None and self.focus_update is None:
+            self.focus_update = self.canvas.after_idle(self.restore_focus_visibility)
+
+    def restore_focus_visibility(self):
+        self.focus_update = None
+        if self.focus_target is not None:
+            self.ensure_visible(self.focus_target)
 
     def focus_changed(self, event):
+        self.focus_target = event.widget
         self.ensure_visible(event.widget)
 
     def ensure_visible(self, widget):
@@ -215,6 +232,8 @@ class ScrollViewport:
         while ancestor is not None and ancestor is not self.body:
             ancestor = getattr(ancestor, 'master', None)
         if ancestor is None:
+            return
+        if not widget.winfo_exists():
             return
         top = widget.winfo_rooty() - self.body.winfo_rooty()
         bottom = top + widget.winfo_height()
