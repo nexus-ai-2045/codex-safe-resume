@@ -1,0 +1,14 @@
+{
+  "schema": "repo-preflight.ratchet-baseline/v1",
+  "counts": {
+    "clean_worktree": 0,
+    "required_documents": 0,
+    "secret_scan": 0,
+    "personal_path_scan": 0,
+    "commit_identity": 0,
+    "dependency_configuration": 0,
+    "ci_configuration": 0,
+    "origin": 0,
+    "repository_consistency": 0
+  }
+}

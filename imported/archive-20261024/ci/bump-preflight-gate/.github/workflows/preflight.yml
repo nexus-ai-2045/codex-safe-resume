@@ -1,0 +1,13 @@
+name: 公開前検査
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  gate:
+    uses: nexus-ai-2045/repo-preflight/.github/workflows/preflight-gate.yml@22c2f4be632c726910553f2c351e4a14158c0b4a
+    with:
+      preflight-ref: 22c2f4be632c726910553f2c351e4a14158c0b4a

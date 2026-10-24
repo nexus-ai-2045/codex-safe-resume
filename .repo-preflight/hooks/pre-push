@@ -1,0 +1,28 @@
+#!/bin/sh
+# 共通 pre-push：必須チェック（gate / preflight）と同じ入口を呼ぶだけ。改行は LF。
+# REPO_PREFLIGHT_HOME は、承認済み SHA に固定した repo-preflight の clone。
+remote="$1"
+RP="${REPO_PREFLIGHT_HOME:?repo-preflight の clone の場所を設定してください}"
+# Python は 3.9 以上（Mac 標準の 3.9 も可）を新しい順に探す。無ければ理由を出して止める。
+# -E -s で PYTHONPATH などの環境変数と利用者の site を読まない（環境変数で検査を差し替えさせない）
+PY=
+for c in python3.13 python3.12 python3.11 python3.10 python3 "py -3" python; do
+  command -v "${c%% *}" >/dev/null 2>&1 || continue
+  if $c -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then PY="$c -E -s -X utf8"; break; fi
+done
+[ -n "$PY" ] || {
+  echo "Python 3.9 以上が見つからないので push を止めます（python3 --version で版を確かめ、3.9 以上を入れてください）" >&2; exit 1; }
+export PYTHONUTF8=1  # 子プロセス用（本体は -X utf8）
+input=$(cat)
+# (1) 名義と形：作者・記録者・署名行（〜-by:）を許可名義と完全一致で、本文と足した行をセッション行・ホームパス・名簿にないメール・鍵の形で。
+#     注釈タグの作者と本文、相手に無い根の commit、固定した gitleaks もここで見る
+printf '%s\n' "$input" | $PY "$RP/scripts/identity_gate.py" --public --pre-push --remote "$remote" || exit 1
+# (2) 秘密情報：送る範囲の gitleaks は (1) の中で、固定した版（references/gitleaks-pins.json のハッシュ）だけを使って見る
+# (3) 全履歴ラチェットは手元では回さない（数分かかるため）。必須チェック preflight（CI）が
+#     PR・merge_group・push のすべてで同じ判定を回す。手元では、送る commit の基準値ファイルを
+#     送り先の基準値（比較元）と比べ、無いか緩めていれば止める（検査は回さないので速い）。
+#     新リポは全件 0 の基準値を最初から入れる。警告だけで通す設定は置かない。
+printf '%s\n' "$input" | $PY "$RP/scripts/push_baseline_guard.py" --repo . --remote "$remote" || exit 1
+# (4) repo 固有のフックへ続ける
+if [ -x .githooks/pre-push ]; then printf '%s\n' "$input" | .githooks/pre-push "$@" || exit 1; fi
+exit 0

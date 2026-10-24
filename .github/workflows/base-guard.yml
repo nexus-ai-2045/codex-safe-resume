@@ -1,0 +1,80 @@
+name: base-guard
+
+# 必須チェック「base-guard」。pull_request_target なので、定義は比較元（保護された側）の版が動く。
+# PR 側のコードは checkout も実行もしない。PR の commit を git の中身として読むだけ。
+# 赤にするもの: 検査を変えるパス（.github/・.githooks/・.repo-preflight/・.gitleaks.toml など）の変更、
+# preflight-gate の呼び出し先の owner/リポ違い、uses の @ と preflight-ref の不一致、呼び出しの削除、
+# 版のタグ（v*）から辿れない SHA（フォーク網の SHA）。タグは ruleset で保護する（人の GO が要る設定）。
+# PIN_TBD: PREFLIGHT_REF の 40桁 SHA は仮。preflight.yml と同じ公開版の SHA に差し替える。
+# ruleset の必須チェック名は「base-guard」。job の name と一致させる。
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  base-guard:
+    name: base-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+      PREFLIGHT_REF: 44fdece1634d4afb355639ad465375dca5e5c868 # PIN_TBD
+    steps:
+      - name: Require pinned repo-preflight SHA
+        run: '[[ "$PREFLIGHT_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "PREFLIGHT_REF には 40桁の commit SHA を書いてください" >&2; exit 1; }'
+      # 比較元だけを checkout する。PR 側は下で commit を取ってくるだけ（作業ツリーには出さない）
+      - name: Check out base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: target
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out repo-preflight
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nexus-ai-2045/repo-preflight
+          ref: ${{ env.PREFLIGHT_REF }}
+          path: tool
+          persist-credentials: false
+          # 版のタグ（v*）から辿れるかを見るため、全履歴とタグを取る（フォーク網の SHA を弾く。M5）
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Verify repo-preflight checkout matches the pinned SHA
+        run: 'test "$(git -C tool rev-parse HEAD)" = "$PREFLIGHT_REF"'
+      - name: Require PREFLIGHT_REF to be reachable from a release tag
+        run: 'test -n "$(git -C tool tag --list "v[0-9]*" --contains "$PREFLIGHT_REF")" || { echo "PREFLIGHT_REF が repo-preflight の版のタグから辿れません" >&2; exit 1; }'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install hash-pinned PyYAML
+        run: python -m pip install --disable-pip-version-check --no-deps --require-hashes -r tool/requirements-guard.txt
+      - name: Fetch PR commit without checking it out
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_FETCH_TOKEN: ${{ github.token }}
+        run: |
+          set +ax
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$EVENT_FETCH_TOKEN" | base64 | tr -d '\r\n')"
+          unset EVENT_FETCH_TOKEN
+          GIT_CONFIG_COUNT=2 \
+          GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL%/}/.extraheader" \
+          GIT_CONFIG_VALUE_0="$auth_header" \
+          GIT_CONFIG_KEY_1=credential.helper \
+          GIT_CONFIG_VALUE_1= \
+          GIT_TERMINAL_PROMPT=0 \
+            git -C target fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+          unset auth_header
+          test "$(git -C target rev-parse 'refs/remotes/pr/head^{commit}')" = "$HEAD_SHA"
+      - name: Check base and PR definitions
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python tool/scripts/base_guard.py --repo target --base-ref "$BASE_SHA" --head-ref refs/remotes/pr/head --trusted-tool tool

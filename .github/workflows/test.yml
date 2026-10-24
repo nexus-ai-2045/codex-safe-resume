@@ -1,0 +1,73 @@
+name: 全OSの回帰検査と配布ビルド
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
+jobs:
+  tests:
+    name: 回帰検査 (${{ matrix.os }}, ${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: 接続検査用の固定依存を導入
+        run: python -m pip install --require-hashes -r packaging/requirements-runtime.lock
+      - name: 配布用の固定依存を導入
+        if: matrix.python-version == '3.13' && runner.os != 'Linux'
+        run: python -m pip install --require-hashes -r packaging/requirements-build.lock
+      - name: 回帰検査
+        run: python -m unittest discover -s tests -v
+      - run: python -m compileall -q core.py app.py desktop_bridge.py watch.py diagnose.py diagnostics.py native_proxy.py connection_settings.py cli_security.py desktop_launcher.py desktop_stdio.py
+      - name: macOS配布物を生成
+        if: matrix.python-version == '3.13' && runner.os == 'macOS'
+        run: bash packaging/build-macos.sh
+      - name: Windows配布物を生成
+        if: matrix.python-version == '3.13' && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PY_PYTHON: '3.13'
+        run: ./packaging/build-windows.ps1
+      - name: Windows受入候補の版とハッシュを記録
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python-version == '3.13' && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PY_PYTHON: '3.13'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pythonVersion = py -c 'import sys; assert sys.version_info[:2] == (3, 13); print(sys.version.split()[0])'
+          if ($LASTEXITCODE -ne 0) { throw '受入候補のPython版を確認できません' }
+          $archive = 'release/CodexSafeResume-Windows-Portable.zip'
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{
+            source_sha = $env:GITHUB_SHA
+            archive = 'CodexSafeResume-Windows-Portable.zip'
+            sha256 = $hash
+            python = $pythonVersion
+            purpose = '実機受入候補（未署名・安定版ではありません）'
+          } | ConvertTo-Json | Set-Content -LiteralPath 'release/windows-acceptance.json' -Encoding utf8NoBOM
+      - name: Windows受入候補を保存（安定版リリースではありません）
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python-version == '3.13' && runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: CodexSafeResume-Windows-${{ github.sha }}
+          path: |
+            release/CodexSafeResume-Windows-Portable.zip
+            release/windows-acceptance.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

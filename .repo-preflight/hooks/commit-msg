@@ -1,0 +1,20 @@
+#!/bin/sh
+# 共通 commit-msg：必須チェック（gate / preflight）と同じ入口を呼ぶだけ。改行は LF。上限 1秒。
+# REPO_PREFLIGHT_HOME は、承認済み SHA に固定した repo-preflight の clone。無ければ止める。
+G="${REPO_PREFLIGHT_HOME:-}/scripts/identity_gate.py"
+[ -n "${REPO_PREFLIGHT_HOME:-}" ] && [ -f "$G" ] || {
+  echo "共通の検査（repo-preflight の identity_gate.py）が見つからないので commit を止めます" >&2; exit 1; }
+# Python は 3.9 以上（Mac 標準の 3.9 も可）を新しい順に探す。無ければ理由を出して止める。
+# -E -s で PYTHONPATH などの環境変数と利用者の site を読まない（環境変数で検査を差し替えさせない）
+PY=
+for c in python3.13 python3.12 python3.11 python3.10 python3 "py -3" python; do
+  command -v "${c%% *}" >/dev/null 2>&1 || continue
+  if $c -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then PY="$c -E -s -X utf8"; break; fi
+done
+[ -n "$PY" ] || {
+  echo "Python 3.9 以上が見つからないので commit を止めます（python3 --version で版を確かめ、3.9 以上を入れてください）" >&2; exit 1; }
+export PYTHONUTF8=1  # 子プロセス用（本体は -X utf8）
+# コミット文：署名行は許可名義と完全一致、本文はセッション行・ホームパス・名簿にないメール・鍵の形
+$PY "$G" --public --repo . --message-file "$1" >/dev/null || exit 1
+if [ -x .githooks/commit-msg ]; then exec .githooks/commit-msg "$@"; fi
+exit 0
