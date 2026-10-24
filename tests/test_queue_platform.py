@@ -397,6 +397,78 @@ class QueuePlatformTests(unittest.TestCase):
                 platform._windows_cli(desktop, server, [server, desktop])
 
 
+class DarwinBackendSelectionTests(unittest.TestCase):
+    def setUp(self):
+        root = pathlib.Path.cwd()
+        self.desktop = {'pid': 10, 'ppid': 1, 'start': [100, 0],
+                        'executable': str(root / 'Codex.app/Contents/MacOS/Codex')}
+        self.server = {'pid': 20, 'ppid': 10, 'start': [200, 0],
+                       'executable': str(root / 'Codex.app/Contents/Resources/codex')}
+        self.gui = {'pid': 30, 'ppid': 1, 'start': [110, 0],
+                    'executable': str(root / 'CodexSafeResume.app/Contents/MacOS/CodexSafeResume')}
+        self.helper = {'pid': 40, 'ppid': 30, 'start': [210, 0], 'executable': self.server['executable']}
+        self.identities = {row['pid']: row for row in (self.desktop, self.server, self.gui, self.helper)}
+        self.holders = [{'pid': 20, 'start': [200, 0]}, {'pid': 40, 'start': [210, 0]}]
+        self.bundles = {10: 'com.openai.codex', 30: 'com.codexsaferesume.app'}
+        import desktop_binding
+        patches = [mock.patch.object(platform, '_platform', return_value='darwin'),
+                   mock.patch.object(platform, '_identity', side_effect=lambda pid: dict(self.identities[pid])),
+                   mock.patch.object(platform, '_server_role', return_value='app-server'),
+                   mock.patch.object(desktop_binding, 'desktop_bundle', side_effect=lambda pid: self.bundles[pid])]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_installed_safe_resume_helper_is_not_a_second_desktop(self):
+        self.assertEqual(platform._backend_holder(self.holders), self.server)
+
+    def test_python_parent_and_proven_other_application_are_excluded(self):
+        self.identities[30] = dict(self.gui, executable=str(pathlib.Path.cwd() / 'python3'))
+        self.assertEqual(platform._backend_holder(self.holders), self.server)
+        self.identities[30] = dict(self.gui)
+        self.bundles[30] = 'com.apple.Terminal'
+        self.assertEqual(platform._backend_holder(self.holders), self.server)
+
+    def test_two_official_backend_holders_are_still_rejected(self):
+        self.bundles[30] = 'com.openai.codex'
+        with self.assertRaises(ValueError):
+            platform._backend_holder(self.holders)
+
+    def test_missing_unreadable_or_malformed_bundle_identity_is_not_skipped(self):
+        import desktop_binding
+        for value in (None, '', 'None', 123, True, b'com.codexsaferesume.app', 'not-a-bundle',
+                      'com.example bad', 'com.example\0app', 'a.' + 'b' * 256):
+            with self.subTest(value=value):
+                self.bundles[30] = value
+                with self.assertRaises(ValueError):
+                    platform._backend_holder(self.holders)
+        with mock.patch.object(desktop_binding, 'desktop_bundle', side_effect=ValueError('unavailable')):
+            with self.assertRaises(ValueError):
+                platform._backend_holder(self.holders)
+
+    def test_parent_pid_reuse_or_path_change_during_bundle_lookup_is_rejected(self):
+        import desktop_binding
+        for change in ({'start': [111, 0]}, {'executable': self.desktop['executable']}):
+            def bundle(pid):
+                if pid == 30:
+                    self.identities[30] = dict(self.gui, **change)
+                return self.bundles[pid]
+            self.identities[30] = dict(self.gui)
+            with mock.patch.object(desktop_binding, 'desktop_bundle', side_effect=bundle):
+                with self.assertRaises(ValueError):
+                    platform._backend_holder(self.holders)
+
+    def test_unreadable_helper_or_parent_remains_a_denial(self):
+        for missing in (30, 40):
+            def identity(pid):
+                if pid == missing:
+                    raise ValueError('unavailable')
+                return dict(self.identities[pid])
+            with mock.patch.object(platform, '_identity', side_effect=identity):
+                with self.assertRaises(ValueError):
+                    platform._backend_holder(self.holders)
+
+
 class QueueAttestationTests(unittest.TestCase):
     def setUp(self):
         import queue_attestation
