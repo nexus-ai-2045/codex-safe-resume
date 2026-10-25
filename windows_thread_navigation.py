@@ -32,6 +32,8 @@ def _native():
         ('FindWindowExW', [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p], ctypes.c_void_p),
         ('IsWindow', [ctypes.c_void_p], ctypes.c_int),
         ('GetClassNameW', [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int], ctypes.c_int),
+        ('GetWindowTextLengthW', [ctypes.c_void_p], ctypes.c_int),
+        ('GetWindowTextW', [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int], ctypes.c_int),
         ('GetWindowThreadProcessId', [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)], ctypes.c_uint32),
         ('SendMessageTimeoutW', [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t,
                                 ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
@@ -43,13 +45,33 @@ def _native():
     return library
 
 
+def _receiver_title():
+    if sys.platform != 'win32':
+        raise ValueError(_ERROR)
+    library = ctypes.WinDLL('shell32', use_last_error=True)
+    function = library.SHGetFolderPathW
+    function.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
+                         ctypes.c_uint32, ctypes.c_wchar_p]
+    function.restype = ctypes.c_int32
+    buffer = ctypes.create_unicode_buffer(260)
+    result = function(None, 0x1a, None, 0, buffer)
+    raw = buffer.value
+    if (type(result) is not int or result != 0 or not raw or '\0' in raw
+            or not 0 < len(raw.encode('utf-16-le')) // 2 < 260):
+        raise ValueError(_ERROR)
+    folder = Path(raw)
+    if not folder.is_absolute() or '..' in folder.parts:
+        raise ValueError(_ERROR)
+    return str(folder / 'Codex' / 'web' / 'Codex')
+
+
 def _handle(value):
     if type(value) is not int or not 0 < value < 2 ** (ctypes.sizeof(ctypes.c_void_p) * 8):
         raise ValueError(_ERROR)
     return value
 
 
-def _window_pid(library, handle):
+def _window_pid(library, handle, title):
     _handle(handle)
     valid = library.IsWindow(handle)
     if type(valid) is not int or valid != 1:
@@ -58,6 +80,17 @@ def _window_pid(library, handle):
     length = library.GetClassNameW(handle, name, len(name))
     if type(length) is not int or length != len(_CLASS) or name.value != _CLASS:
         raise ValueError(_ERROR)
+    expected = len(title.encode('utf-16-le')) // 2
+    length = library.GetWindowTextLengthW(handle)
+    if type(length) is not int or length != expected or not 0 < length <= 32767:
+        raise ValueError(_ERROR)
+    text = ctypes.create_unicode_buffer(length + 1)
+    copied = library.GetWindowTextW(handle, text, len(text))
+    after = library.GetWindowTextLengthW(handle)
+    if (type(copied) is not int or copied != expected or text.value != title
+            or len(text.value.encode('utf-16-le')) // 2 != expected
+            or type(after) is not int or after != expected):
+        raise ValueError(_ERROR)
     pid = ctypes.c_uint32()
     thread = library.GetWindowThreadProcessId(handle, ctypes.byref(pid))
     if type(thread) is not int or not 0 < thread <= 0xffffffff or not pid.value:
@@ -65,10 +98,10 @@ def _window_pid(library, handle):
     return pid.value
 
 
-def _unique_window(library, pid):
+def _unique_window(library, pid, title):
     found, seen, previous = [], set(), None
     for _ in range(1024):
-        handle = library.FindWindowExW(_HWND_MESSAGE, previous, _CLASS, None)
+        handle = library.FindWindowExW(_HWND_MESSAGE, previous, _CLASS, title)
         if handle is None or type(handle) is int and handle == 0:
             if len(found) != 1:
                 raise ValueError(_ERROR)
@@ -77,7 +110,7 @@ def _unique_window(library, pid):
         if handle in seen:
             raise ValueError(_ERROR)
         seen.add(handle)
-        if _window_pid(library, handle) == pid:
+        if _window_pid(library, handle, title) == pid:
             found.append(handle)
             if len(found) > 1:
                 raise ValueError(_ERROR)
@@ -113,15 +146,15 @@ def _payload(executable, uri):
     return value.encode('utf-16-le')
 
 
-def _same_window(library, handle, evidence):
+def _same_window(library, handle, evidence, title):
     desktop = evidence['desktop']
-    return (_unique_window(library, desktop['pid']) == handle
-            and _window_pid(library, handle) == desktop['pid']
+    return (_unique_window(library, desktop['pid'], title) == handle
+            and _window_pid(library, handle, title) == desktop['pid']
             and process_identity(desktop['pid']) == desktop)
 
 
-def _unchanged(library, handle, evidence):
-    return queue_platform.revalidate(evidence) and _same_window(library, handle, evidence)
+def _unchanged(library, handle, evidence, title):
+    return queue_platform.revalidate(evidence) and _same_window(library, handle, evidence, title)
 
 
 def request_open(uri, *, before_open=None):
@@ -135,21 +168,22 @@ def request_open(uri, *, before_open=None):
         raise ValueError(_ERROR)
     home = Path(raw_home).expanduser().absolute()
     evidence, executable = _target(home)
+    title = _receiver_title()
     library = _native()
-    handle = _unique_window(library, evidence['desktop']['pid'])
+    handle = _unique_window(library, evidence['desktop']['pid'], title)
     raw = _payload(executable, uri)
     buffer = ctypes.create_string_buffer(raw, len(raw))
     data = _CopyData(0, len(raw), ctypes.cast(buffer, ctypes.c_void_p))
-    if not _unchanged(library, handle, evidence):
+    if not _unchanged(library, handle, evidence, title):
         raise ValueError(_ERROR)
     if before_open is not None and before_open() is not True:
         raise ValueError(_ERROR)
-    if not _same_window(library, handle, evidence):
+    if not _same_window(library, handle, evidence, title):
         raise ValueError(_ERROR)
     accepted = ctypes.c_size_t()
     result = library.SendMessageTimeoutW(handle, _WM_COPYDATA, 0, ctypes.byref(data),
                                          _FLAGS, _TIMEOUT_MS, ctypes.byref(accepted))
     if (type(result) is not int or result == 0 or accepted.value != 1
-            or not _unchanged(library, handle, evidence)):
+            or not _unchanged(library, handle, evidence, title)):
         raise ValueError(_ERROR)
     return True

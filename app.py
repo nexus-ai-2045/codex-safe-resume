@@ -1558,8 +1558,8 @@ class GUI:
         if outcome == 'requested':
             self.write('Codexに元のチャットを開くよう要求しました。')
         elif outcome == 'failed':
-            messagebox.showwarning('チャットを開けません',
-                                   'Codexに元のチャットを開く要求を渡せませんでした。Codexの状態を確認してください。',
+            messagebox.showwarning('表示結果を確認できません',
+                                   '元のチャットを開く要求の結果を確認できません。Codex側で対象を確認してください。',
                                    parent=self.root)
 
     def show_technical_details(self):

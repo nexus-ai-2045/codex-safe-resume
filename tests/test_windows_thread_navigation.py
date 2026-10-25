@@ -22,22 +22,40 @@ class NativeHarness:
         self.handles = [101]
         self.pid = 1234
         self.class_name = 'Chrome_MessageWindow'
+        self.titles = {}
+        self.default_title = ''
+        self.roaming = ''
         self.ack = 1
         self.result = 1
         self.messages = []
         self.library = SimpleNamespace(
             FindWindowExW=Mock(side_effect=self.find), IsWindow=Mock(return_value=1),
             GetClassNameW=Mock(side_effect=self.name),
+            GetWindowTextLengthW=Mock(side_effect=lambda handle: len(self.title(handle).encode('utf-16-le')) // 2),
+            GetWindowTextW=Mock(side_effect=self.text),
+            SHGetFolderPathW=Mock(side_effect=self.folder),
             GetWindowThreadProcessId=Mock(side_effect=self.owner),
             SendMessageTimeoutW=Mock(side_effect=self.send))
 
     def find(self, parent, previous, name, title):
-        if parent != -3 or name != 'Chrome_MessageWindow' or title is not None:
+        if parent != -3 or name != 'Chrome_MessageWindow':
             raise AssertionError('Unexpected window search')
+        matches = [handle for handle in self.handles if title is None or self.title(handle) == title]
         if previous is None:
-            return self.handles[0] if self.handles else None
-        index = self.handles.index(previous) + 1
-        return self.handles[index] if index < len(self.handles) else None
+            return matches[0] if matches else None
+        index = matches.index(previous) + 1
+        return matches[index] if index < len(matches) else None
+
+    def title(self, handle):
+        return self.titles.get(handle, self.default_title)
+
+    def text(self, handle, buffer, count):
+        buffer.value = self.title(handle)
+        return len(buffer.value.encode('utf-16-le')) // 2
+
+    def folder(self, hwnd, folder, token, flags, buffer):
+        buffer.value = self.roaming
+        return 0
 
     def name(self, handle, buffer, count):
         buffer.value = self.class_name
@@ -69,6 +87,9 @@ class WindowsThreadNavigation(unittest.TestCase):
         self.evidence = dict(platform='win32', home=str(self.home), desktop=self.identity,
                              attestation=dict(package=dict(self.package)))
         self.native = NativeHarness()
+        self.roaming = Path(self.directory.name).resolve() / '利用者😀/Roaming'
+        self.native.roaming = str(self.roaming)
+        self.native.default_title = str(self.roaming / 'Codex/web/Codex')
         self.start(patch('windows_thread_navigation.sys.platform', 'win32'))
         self.start(patch.dict(os.environ, CODEX_HOME=str(self.home)))
         self.desktop = self.start(patch('windows_thread_navigation.queue_platform.desktop_for_home', return_value=self.evidence))
@@ -178,6 +199,91 @@ class WindowsThreadNavigation(unittest.TestCase):
         self.native.handles = [101]
         self.native.pid = 9999
         self.reject()
+
+    def test_same_pid_other_titles_are_excluded_from_singleton_receiver(self):
+        self.native.handles = [99, 100, 101, 102]
+        self.native.titles = {99: 'other-profile', 100: 'support-service', 102: 'unrelated'}
+        self.assertTrue(navigation.request_open(URI))
+        self.assertEqual(self.native.messages[0]['handle'], 101)
+
+    def test_known_folder_native_result_ignores_appdata_environment(self):
+        with patch.dict(os.environ, APPDATA='Z:/untrusted-profile'):
+            self.assertTrue(navigation.request_open(URI))
+        calls = self.native.library.FindWindowExW.call_args_list
+        self.assertTrue(calls)
+        self.assertTrue(all(call.args[3] == self.native.default_title for call in calls))
+        folder_call, = self.native.library.SHGetFolderPathW.call_args_list
+        self.assertEqual(folder_call.args[:4], (None, 0x1a, None, 0))
+        self.assertEqual(len(folder_call.args[4]), 260)
+        self.assertEqual(self.native.library.SHGetFolderPathW.argtypes,
+            [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p])
+        self.assertIs(self.native.library.SHGetFolderPathW.restype, ctypes.c_int32)
+
+    def test_japanese_and_non_bmp_title_uses_utf16_unit_lengths(self):
+        self.assertIn('😀', self.native.default_title)
+        self.assertTrue(navigation.request_open(URI))
+        expected = len(self.native.default_title.encode('utf-16-le')) // 2
+        self.assertGreater(expected, len(self.native.default_title))
+        self.assertTrue(all(call.args[2] == expected + 1
+                            for call in self.native.library.GetWindowTextW.call_args_list))
+
+    def test_unknown_profile_has_no_title_search_fallback(self):
+        self.native.titles[101] = str(self.roaming / 'Codex/other-profile')
+        self.reject()
+        self.native.library.FindWindowExW.assert_called_once_with(
+            -3, None, 'Chrome_MessageWindow', self.native.default_title)
+
+    def test_known_folder_failure_empty_relative_or_parent_path_is_rejected(self):
+        self.native.library.SHGetFolderPathW.side_effect = None
+        for result in (1, -1, None, True):
+            self.native.library.SHGetFolderPathW.return_value = result
+            self.reject()
+        self.native.library.SHGetFolderPathW.side_effect = self.native.folder
+        for value in ('', 'relative/path', str(self.roaming / '../other')):
+            self.native.roaming = value
+            self.reject()
+        self.native.library.FindWindowExW.assert_not_called()
+
+    def test_title_length_malformed_empty_or_oversized_is_rejected(self):
+        self.native.library.GetWindowTextLengthW.side_effect = None
+        for value in (0, -1, 32768, True, None, '10'):
+            self.native.library.GetWindowTextLengthW.return_value = value
+            self.reject()
+        self.native.library.GetWindowTextW.assert_not_called()
+
+    def test_title_copy_return_and_exact_text_are_verified(self):
+        self.native.library.GetWindowTextW.side_effect = None
+        expected = len(self.native.default_title.encode('utf-16-le')) // 2
+        for value in (0, expected - 1, expected + 1, True, None):
+            self.native.library.GetWindowTextW.return_value = value
+            self.reject()
+        def wrong_text(handle, buffer, count):
+            buffer.value = self.native.default_title[:-5] + 'Other'
+            return expected
+        self.native.library.GetWindowTextW.side_effect = wrong_text
+        self.reject()
+
+    def test_title_change_during_length_read_is_rejected(self):
+        expected = len(self.native.default_title.encode('utf-16-le')) // 2
+        self.native.library.GetWindowTextLengthW.side_effect = [expected, expected + 1]
+        self.reject()
+
+    def test_title_change_during_confirmation_never_dispatches(self):
+        def change_title():
+            self.native.titles[101] = 'changed-profile'
+            return True
+        self.reject(before_open=change_title)
+
+    def test_title_change_after_dispatch_fails_without_retry(self):
+        old_send = self.native.send
+        def changed(*args):
+            result = old_send(*args)
+            self.native.titles[101] = 'changed-profile'
+            return result
+        self.native.library.SendMessageTimeoutW.side_effect = changed
+        with self.assertRaises(ValueError):
+            navigation.request_open(URI)
+        self.native.library.SendMessageTimeoutW.assert_called_once()
 
     def test_other_process_windows_do_not_change_unique_official_target(self):
         self.native.handles = [99, 101]
