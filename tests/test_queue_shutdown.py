@@ -49,17 +49,20 @@ class QueueShutdownTests(unittest.TestCase):
         self.gui.quit_app()
         self.assertFalse(auto_watch.status(self.db)['enabled'])
         self.assertFalse(queue_state.permitted(self.db, row))
+        self.gui.root.quit.assert_not_called()
         self.gui.root.destroy.assert_not_called()
 
     def test_quit_without_pending_disables_and_destroys(self):
         self.gui.quit_app()
         self.assertFalse(auto_watch.status(self.db)['enabled'])
+        self.gui.root.quit.assert_called_once()
         self.gui.root.destroy.assert_called_once()
 
     def test_durable_off_failure_keeps_window_and_database_open(self):
         with patch('app.set_auto_watch', side_effect=RuntimeError('fixture')):
             self.gui.quit_app()
         self.assertFalse(self.gui.closing)
+        self.gui.root.quit.assert_not_called()
         self.gui.root.destroy.assert_not_called()
         self.gui.db.execute('SELECT 1')
         self.gui.show_window.assert_called_once()
@@ -80,6 +83,7 @@ class QueueShutdownTests(unittest.TestCase):
             self.gui.finish_quit()
             self.finish_worker()
         cleanup.assert_called_once_with(self.home)
+        self.gui.root.quit.assert_called_once()
         self.gui.root.destroy.assert_called_once()
 
     def test_unknown_cleanup_holds_quit_with_off_persisted(self):
@@ -89,6 +93,7 @@ class QueueShutdownTests(unittest.TestCase):
             self.finish_worker()
         self.assertFalse(self.gui.closing)
         self.assertFalse(auto_watch.status(self.db)['enabled'])
+        self.gui.root.quit.assert_not_called()
         self.gui.root.destroy.assert_not_called()
         self.gui.db.execute('SELECT 1')
         self.gui.show_window.assert_called_once()
@@ -98,6 +103,7 @@ class QueueShutdownTests(unittest.TestCase):
         with patch('app.reconcile_pending_shutdown', side_effect=OSError('private')):
             self.gui.quit_app()
             self.finish_worker()
+        self.gui.root.quit.assert_not_called()
         self.gui.root.destroy.assert_not_called()
         self.assertFalse(self.gui.closing)
         self.assertNotIn('private', str(self.gui.write.call_args))
@@ -106,6 +112,7 @@ class QueueShutdownTests(unittest.TestCase):
         self.gui.tray = Mock()
         self.gui.tray.stop.side_effect = OSError('fixture')
         self.gui.quit_app()
+        self.gui.root.quit.assert_not_called()
         self.gui.root.destroy.assert_not_called()
         self.gui.show_window.assert_called_once()
         self.assertFalse(self.gui.closing)
