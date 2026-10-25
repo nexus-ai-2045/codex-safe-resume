@@ -1,6 +1,7 @@
 import os
 import pathlib
 import plistlib
+import subprocess
 import types
 import tempfile
 import sys
@@ -38,6 +39,9 @@ class QueuePlatformTests(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
+        security = mock.patch('queue_attestation._security', return_value=b'fixture-acl')
+        security.start()
+        self.addCleanup(security.stop)
 
     def test_selects_requested_home_without_global_singleton(self):
         result = platform.desktop_for_home(self.home)
@@ -350,6 +354,102 @@ class QueuePlatformTests(unittest.TestCase):
         with mock.patch.object(platform, 'reject_links', side_effect=refuse_native), mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), mock.patch('desktop_binding.desktop_bundle', return_value='com.openai.codex'), mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)):
             with self.assertRaises((ValueError, RuntimeError)):
                 platform._darwin_cli(desktop, server, [server, desktop], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_does_not_query_processes_or_stage_files(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run, \
+                mock.patch('desktop_binding.desktop_bundle') as binding, \
+                mock.patch.object(platform, '_identity') as identity, \
+                mock.patch('windows_runtime.stage_cli') as stage:
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('--deep', run.call_args_list[0].args[0])
+        binding.assert_not_called()
+        identity.assert_not_called()
+        stage.assert_not_called()
+
+    def test_darwin_signature_deadline_is_finite_thirty_seconds_without_weakening_checks(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        self.assertTrue(run.call_args_list)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs['timeout'], 30)
+            self.assertIn('--strict', call.args[0])
+            self.assertIn(platform.DARWIN_TEAM, call.args[0][4])
+        self.assertIn('--deep', run.call_args_list[0].args[0])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=subprocess.TimeoutExpired('codesign', 30)) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        run.assert_called_once()
+
+    def test_file_only_darwin_verifier_rejects_signature_seal_acl_and_escape(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=1)):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        with mock.patch.object(platform, 'validate_location', side_effect=ValueError('ACL')), \
+                mock.patch.object(platform.subprocess, 'run') as signature:
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+            signature.assert_not_called()
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)):
+            for target in (self.home/'codex', bundle/'Contents/../codex'):
+                with self.subTest(target=target):
+                    with self.assertRaises(ValueError):
+                        platform.verify_darwin_cli_files(bundle, [target], platform.DARWIN_TEAM)
+            envelope = bundle/'Contents/_CodeSignature/CodeResources'
+            envelope.write_bytes(plistlib.dumps({'files2': {cli.relative_to(bundle/'Contents').as_posix(): {'hash2': b'wrong'*6+b'xx'}}}))
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_cli_changed_during_codesign(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        def replace_after_signature(*args, **kwargs):
+            cli.write_bytes(b'updated during verification')
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=replace_after_signature):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_acl_changed_during_codesign(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        security = [b'initial-acl']
+        def change_acl(*args, **kwargs):
+            security[0] = b'changed-acl'
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch('queue_attestation._security', side_effect=lambda path: security[0]), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=change_acl):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_bad_publisher_and_bundle_identity(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with self.assertRaises(ValueError):
+            platform.verify_darwin_cli_files(bundle, [cli], 'OTHERTEAM')
+        plist = bundle/'Contents/Info.plist'
+        plist.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.example.other',
+                                         'CFBundleExecutable': 'Codex'}))
+        with self.assertRaises(ValueError):
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        for executable in ('../outside', '/absolute', '', None):
+            plist.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.openai.codex',
+                                             'CFBundleExecutable': executable or ''}))
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
 
     def test_restart_manager_inventory_releases_session_on_error(self):
         native = types.SimpleNamespace(**{name: mock.Mock(return_value=0) for name in ('RmStartSession', 'RmRegisterResources', 'RmGetList', 'RmEndSession')})

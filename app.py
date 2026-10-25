@@ -84,24 +84,31 @@ def create_tray_image(Image, ImageDraw):
 
 
 def usage_executable(config):
-    """表示専用の取得元。設定したCLIのpinを優先し、未知のPATHを実行しない。"""
+    """表示用のpinを優先し、更新後は署名検証した固定公式bundleだけを使う。"""
     if config:
-        return validate_executable(config, require_confirmation=False)
+        try:
+            return validate_executable(config, require_confirmation=False)
+        except (ValueError, OSError, RuntimeError):
+            if sys.platform != 'darwin':
+                raise
     if sys.platform == 'darwin':
-        bundled = pathlib.Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
-        if bundled.is_file():
-            return validate_location(bundled)
+        from queue_platform import DARWIN_TEAM, verify_darwin_cli_files
+        bundle = pathlib.Path('/Applications/ChatGPT.app')
+        bundled = bundle / 'Contents' / 'Resources' / 'codex-cli' / 'bin' / 'codex'
+        verify_darwin_cli_files(bundle, [bundled], DARWIN_TEAM)
+        return bundled
     raise ValueError('公式CLIを選択してください')
 
 
 def read_usage_status(config):
     """表示用の取得元だけを照合。既存共有接続への読取り以外は行わない。"""
-    executable = usage_executable(config)
     peer = None
     state = 'not_configured'
     if config:
         state = 'unavailable'
         try:
+            # 古いpinで共有接続へ触れず、表示用bundleの重い検証は最後に一度だけ。
+            validate_executable(config, require_confirmation=False)
             if config.get('mode') == 'queue':
                 from queue_bridge import QueueBridge
                 selected = QueueBridge(config=config, for_pending=True, timeout=3)
