@@ -1,7 +1,7 @@
 name: preflight
 
 # 共通の入口（repo-preflight の preflight-gate）を SHA 固定で呼ぶ。
-# PIN_TBD: 下の 40桁 SHA は仮。repo-preflight の公開版（保護された v* タグから辿れる SHA）に差し替える。
+# 固定先: repo-preflight v0.10.0（保護された v* タグから辿れる SHA）。
 
 on:
   pull_request:
