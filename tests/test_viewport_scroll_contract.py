@@ -65,3 +65,16 @@ class ViewportScrollContract(unittest.TestCase):
         view.resize()
         view.canvas.after_cancel.assert_not_called()
         self.assertEqual(view.focus_update, 'fresh-focus')
+
+    def test_scroll_region_covers_native_body_and_shrinks_when_it_settles(self):
+        view = self.viewport()
+        view.canvas.winfo_height.return_value = 700
+        view.canvas.yview.return_value = (0.0, 1.0)
+        view.body.winfo_reqheight = lambda: 626
+        view.body.winfo_height = lambda: 721
+        view.resize()
+        view.canvas.itemconfigure.assert_called_with(1, width=100, height=700)
+        view.canvas.configure.assert_called_with(scrollregion=(0, 0, 100, 721))
+        view.body.winfo_height = lambda: 700
+        view.resize()
+        view.canvas.configure.assert_called_with(scrollregion=(0, 0, 100, 700))

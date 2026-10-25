@@ -209,13 +209,17 @@ class ScrollViewport:
         width = max(1, self.canvas.winfo_width())
         visible = self.canvas.winfo_height()
         height = max(visible, self.body.winfo_reqheight())
-        if self.layout_size == (width, height, visible):
+        actual = self.body.winfo_height()
+        if self.layout_size == (width, height, visible, actual):
             return
-        self.layout_size = (width, height, visible)
+        self.layout_size = (width, height, visible, actual)
         first, last = self.canvas.yview()
         at_bottom = first > 0 and last >= 1
         self.canvas.itemconfigure(self.content, width=width, height=height)
-        self.canvas.configure(scrollregion=(0, 0, width, height))
+        # Native Tk can temporarily allocate more than the requested window
+        # height. Keep that content reachable without fixing the window at
+        # its previous size; the next Configure can shrink the region again.
+        self.canvas.configure(scrollregion=(0, 0, width, max(height, actual)))
         if at_bottom and not self.fresh_focus:
             # Keep an explicit scroll to the end while wrapped labels settle.
             # A queued check of the old focused control must not pull it back.
