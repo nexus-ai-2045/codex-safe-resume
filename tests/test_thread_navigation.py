@@ -118,7 +118,7 @@ class ThreadNavigation(unittest.TestCase):
         self.assertNotIn(str(self.bundle), str(caught.exception))
 
     def test_unverified_platform_has_no_fallback(self):
-        for platform in ('win32', 'linux'):
+        for platform in ('linux',):
             with patch('thread_navigation.sys.platform', platform):
                 with self.assertRaises(navigation.ThreadNavigationError):
                     navigation.open_thread(THREAD)

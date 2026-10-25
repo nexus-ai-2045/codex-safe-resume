@@ -93,6 +93,14 @@ def open_thread(thread_id, *, before_open=None):
         thread = check_id(thread_id)
     except (TypeError, ValueError):
         raise ThreadNavigationError('チャットの識別情報を確認できません。') from None
+    uri = 'codex://threads/' + thread
+    if sys.platform == 'win32':
+        try:
+            from windows_thread_navigation import request_open
+            return request_open(uri, before_open=before_open)
+        except (OSError, ValueError, RuntimeError, ImportError, AttributeError, KeyError,
+                TypeError, subprocess.SubprocessError):
+            raise ThreadNavigationError(_ERROR) from None
     if sys.platform != 'darwin':
         raise ThreadNavigationError(
             'この端末でチャットを開く方法は未検証です。Codexで対象を開いてください。')
@@ -107,7 +115,7 @@ def open_thread(thread_id, *, before_open=None):
         event = descriptors.appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID_(
             int.from_bytes(b'GURL', 'big'), int.from_bytes(b'GURL', 'big'), target, -1, 0)
         event.setParamDescriptor_forKeyword_(
-            descriptors.descriptorWithString_('codex://threads/' + thread), int.from_bytes(b'----', 'big'))
+            descriptors.descriptorWithString_(uri), int.from_bytes(b'----', 'big'))
         if before_open is not None and before_open() is not True:
             raise ValueError('cancelled')
         if process_identity(identity['pid']) != identity:
