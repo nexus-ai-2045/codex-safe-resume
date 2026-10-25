@@ -67,8 +67,14 @@ class SmallWindowLayout(unittest.TestCase):
         viewport = getattr(self.gui, 'viewport', None)
         bounds = viewport.canvas if viewport else self.root
         top = widget.winfo_rooty() - bounds.winfo_rooty()
-        self.assertGreaterEqual(top, -1)
-        self.assertLessEqual(top + widget.winfo_height(), bounds.winfo_height() + 1)
+        geometry = dict(tk=self.root.tk.call('info', 'patchlevel'),
+                        canvas_height=bounds.winfo_height(), target_bottom=top + widget.winfo_height(),
+                        region=viewport.canvas.cget('scrollregion') if viewport else None,
+                        yview=viewport.canvas.yview() if viewport else None,
+                        requested=viewport.body.winfo_reqheight() if viewport else None,
+                        actual=viewport.body.winfo_height() if viewport else None)
+        self.assertGreaterEqual(top, -1, geometry)
+        self.assertLessEqual(top + widget.winfo_height(), bounds.winfo_height() + 1, geometry)
 
     def test_small_windows_keep_top_and_bottom_controls_reachable(self):
         for width, height in ((620, 420), (752, 500), (1060, 700)):

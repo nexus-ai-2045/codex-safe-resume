@@ -189,6 +189,7 @@ def usage_view_text(view):
 class ScrollViewport:
     def __init__(self, root):
         self.focus_target = None
+        self.fresh_focus = False
         self.focus_update = None
         self.layout_size = None
         self.canvas = tk.Canvas(root, background='#F3F6FA', highlightthickness=0,
@@ -211,21 +212,35 @@ class ScrollViewport:
         if self.layout_size == (width, height, visible):
             return
         self.layout_size = (width, height, visible)
+        first, last = self.canvas.yview()
+        at_bottom = first > 0 and last >= 1
         self.canvas.itemconfigure(self.content, width=width, height=height)
         self.canvas.configure(scrollregion=(0, 0, width, height))
+        if at_bottom and not self.fresh_focus:
+            # Keep an explicit scroll to the end while wrapped labels settle.
+            # A queued check of the old focused control must not pull it back.
+            if self.focus_update is not None:
+                self.canvas.after_cancel(self.focus_update)
+                self.focus_update = None
+            self.canvas.yview_moveto(1)
+            return
         # Wrapping can change the focused control's position after FocusIn.
         # Restore visibility when dimensions settle, not on manual scrolling.
         if self.focus_target is not None and self.focus_update is None:
-            self.focus_update = self.canvas.after_idle(self.restore_focus_visibility)
+            self.focus_update = self.canvas.after(30, self.restore_focus_visibility)
 
     def restore_focus_visibility(self):
         self.focus_update = None
+        self.fresh_focus = False
         if self.focus_target is not None:
             self.ensure_visible(self.focus_target)
 
     def focus_changed(self, event):
+        self.fresh_focus = True
         self.focus_target = event.widget
         self.ensure_visible(event.widget)
+        if self.focus_update is None:
+            self.focus_update = self.canvas.after(30, self.restore_focus_visibility)
 
     def ensure_visible(self, widget):
         ancestor = widget
@@ -239,7 +254,8 @@ class ScrollViewport:
         bottom = top + widget.winfo_height()
         first = self.canvas.canvasy(0)
         visible = self.canvas.winfo_height()
-        height = self.body.winfo_height()
+        region = self.canvas.tk.splitlist(self.canvas.cget('scrollregion'))
+        height = float(region[3]) - float(region[1]) if len(region) == 4 else self.body.winfo_height()
         if top < first:
             self.canvas.yview_moveto(top / max(1, height))
         elif bottom > first + visible:
