@@ -22,6 +22,7 @@ class ViewportScrollContract(unittest.TestCase):
         view.focus_update = None
         view.focus_target = None
         view.fresh_focus = False
+        view.focus_anchor = None
         return view
 
     def test_focus_uses_scroll_region_extent_during_deferred_geometry(self):
@@ -83,6 +84,8 @@ class ViewportScrollContract(unittest.TestCase):
         view = self.viewport()
         view.canvas.yview.return_value = (0.0, 0.42)
         view.focus_target = object()
+        view.focus_anchor = 200
+        view.canvas.canvasy.return_value = 0
         view.layout_size = (100, 1000, 420, 1000)
         view.resize()
         view.canvas.after.assert_not_called()
@@ -94,3 +97,26 @@ class ViewportScrollContract(unittest.TestCase):
         view.schedule_resize()
         view.schedule_resize()
         view.canvas.after_idle.assert_called_once_with(view.resize)
+
+    def test_manual_scroll_clears_old_focus_before_deferred_native_resize(self):
+        view = self.viewport()
+        view.focus_target = object()
+        view.focus_anchor = 200
+        view.focus_update = 'stale-focus'
+        view.canvas.canvasy.return_value = 0
+        view.canvas.yview.return_value = (0.0, 0.6)
+        view.resize()
+        self.assertIsNone(view.focus_target)
+        view.canvas.after_cancel.assert_called_once_with('stale-focus')
+        view.canvas.after.assert_not_called()
+        view.canvas.yview_moveto.assert_not_called()
+
+    def test_pending_callback_respects_manual_scroll_without_configure(self):
+        view = self.viewport()
+        view.focus_target = object()
+        view.focus_anchor = 200
+        view.canvas.canvasy.return_value = 0
+        view.ensure_visible = Mock()
+        view.restore_focus_visibility()
+        view.ensure_visible.assert_not_called()
+        self.assertIsNone(view.focus_target)

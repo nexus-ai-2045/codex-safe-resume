@@ -190,6 +190,7 @@ class ScrollViewport:
     def __init__(self, root):
         self.focus_target = None
         self.fresh_focus = False
+        self.focus_anchor = None
         self.focus_update = None
         self.resize_pending = None
         self.layout_size = None
@@ -217,10 +218,9 @@ class ScrollViewport:
         visible = self.canvas.winfo_height()
         height = max(visible, self.body.winfo_reqheight())
         actual = self.body.winfo_height()
+        self.discard_scrolled_focus()
         if self.layout_size == (width, height, visible, actual):
             return
-        previous = self.layout_size
-        bounds_changed = previous is None or (previous[0], previous[2]) != (width, visible)
         self.layout_size = (width, height, visible, actual)
         first, last = self.canvas.yview()
         at_bottom = first > 0 and last >= 1
@@ -239,12 +239,24 @@ class ScrollViewport:
             return
         # Wrapping can change the focused control's position after FocusIn.
         # Restore visibility when dimensions settle, not on manual scrolling.
-        if (self.focus_target is not None and self.focus_update is None
-                and (self.fresh_focus or bounds_changed)):
+        if self.focus_target is not None and self.focus_update is None:
             self.focus_update = self.canvas.after(30, self.restore_focus_visibility)
+
+    def discard_scrolled_focus(self):
+        if (self.focus_target is not None and not self.fresh_focus
+                and self.focus_anchor is not None
+                and abs(self.canvas.canvasy(0) - self.focus_anchor) > 1):
+            # A later native Configure must not undo a user's scroll away
+            # from the previously focused control.
+            self.focus_target = None
+            self.focus_anchor = None
+            if self.focus_update is not None:
+                self.canvas.after_cancel(self.focus_update)
+                self.focus_update = None
 
     def restore_focus_visibility(self):
         self.focus_update = None
+        self.discard_scrolled_focus()
         self.fresh_focus = False
         if self.focus_target is not None:
             self.ensure_visible(self.focus_target)
@@ -274,6 +286,7 @@ class ScrollViewport:
             self.canvas.yview_moveto(top / max(1, height))
         elif bottom > first + visible:
             self.canvas.yview_moveto((bottom - visible) / max(1, height))
+        self.focus_anchor = self.canvas.canvasy(0)
 
 
 class GUI:
