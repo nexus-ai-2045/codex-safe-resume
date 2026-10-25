@@ -14,9 +14,9 @@ permissions:
 
 jobs:
   gate:
-    uses: nexus-ai-2045/repo-preflight/.github/workflows/preflight-gate.yml@44fdece1634d4afb355639ad465375dca5e5c868 # PIN_TBD vX.Y.Z
+    uses: nexus-ai-2045/repo-preflight/.github/workflows/preflight-gate.yml@5b7c774deb8e9abcf0fce0c5f39ec1c1f3a894f3 # v0.10.0
     with:
-      preflight-ref: 44fdece1634d4afb355639ad465375dca5e5c868 # PIN_TBD（uses の @ と同じ SHA）
+      preflight-ref: 5b7c774deb8e9abcf0fce0c5f39ec1c1f3a894f3 # v0.10.0（uses の @ と同じ SHA）
   # 必須にするのはこの集約ジョブ。if: で飛ばしても skipped は成功にならず赤になる
   all-green:
     if: always()
