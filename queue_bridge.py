@@ -87,8 +87,11 @@ class QueueBridge:
         try:
             if ipc is not None:
                 ipc.__exit__(None, None, None)
+            return True
         except Exception:
-            pass
+            self.connected = False
+            self.evidence = None
+            return False
 
     def _close(self):
         try:
@@ -148,7 +151,8 @@ class QueueBridge:
         except Exception:
             raise BridgeError(_ERROR) from None
         finally:
-            self._close_reader()
+            if not self._close_reader():
+                raise BridgeError(_ERROR) from None
 
     def quota(self):
         try:

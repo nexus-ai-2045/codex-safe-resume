@@ -178,15 +178,67 @@ class QueueBridgeTests(unittest.TestCase):
     def test_snapshot_close_failure_is_detached_and_bridge_close_is_idempotent(self):
         first, second = self.reader(), self.reader()
         first.__exit__.side_effect = ValueError('close')
-        with patch('queue_bridge.DesktopIpc', side_effect=[first, second]):
+        with patch('queue_bridge.DesktopIpc', side_effect=[first, second]) as factory:
             with self.bridge() as bridge:
-                self.assertEqual(bridge.snapshot(THREAD), live())
-                self.assertEqual(bridge.snapshot(THREAD), live())
+                with self.assertRaises(queue_bridge.BridgeError):
+                    bridge.snapshot(THREAD)
+                self.assertIsNone(bridge.ipc)
+                self.assertFalse(bridge.connected)
+                self.assertFalse(bridge.capabilities()['desktop_binding'])
+                self.assertFalse(bridge.capabilities()['guarded_admission'])
+                with self.assertRaises(queue_bridge.BridgeError):
+                    bridge.snapshot(THREAD)
+                with self.assertRaises(queue_bridge.QueueNotStarted):
+                    bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
                 bridge._close()
                 bridge._close()
             self.assertIsNone(bridge.ipc)
+        factory.assert_called_once()
         first.__exit__.assert_called_once()
-        second.__exit__.assert_called_once()
+        second.__enter__.assert_not_called()
+        self.transport.enqueue.assert_not_called()
+
+    def test_snapshot_read_and_close_failure_disable_admission(self):
+        self.ipc.snapshot.side_effect = ValueError('snapshot')
+        self.ipc.__exit__.side_effect = ValueError('close')
+        with self.bridge() as bridge:
+            with self.assertRaises(queue_bridge.BridgeError):
+                bridge.snapshot(THREAD)
+            self.assertFalse(bridge.connected)
+            self.assertFalse(bridge.capabilities()['guarded_admission'])
+            with self.assertRaises(queue_bridge.QueueNotStarted):
+                bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
+        self.ipc.__exit__.assert_called_once()
+        self.transport.enqueue.assert_not_called()
+
+    def test_initial_reader_enter_and_close_failure_leave_bridge_disabled(self):
+        self.ipc.__enter__.side_effect = ValueError('owner')
+        self.ipc.__exit__.side_effect = ValueError('close')
+        bridge = self.bridge()
+        with self.assertRaises(queue_bridge.BridgeError):
+            bridge.__enter__()
+        bridge._close()
+        self.assertIsNone(bridge.ipc)
+        self.assertFalse(bridge.capabilities()['guarded_admission'])
+        with self.assertRaises(queue_bridge.QueueNotStarted):
+            bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
+        self.ipc.__exit__.assert_called_once()
+        self.transport.enqueue.assert_not_called()
+
+    def test_context_close_failure_disables_bridge_and_is_idempotent(self):
+        self.ipc.__exit__.side_effect = ValueError('close')
+        bridge = self.bridge()
+        bridge.__enter__()
+        bridge.__exit__(None, None, None)
+        bridge.__exit__(None, None, None)
+        self.assertIsNone(bridge.ipc)
+        self.assertFalse(bridge.capabilities()['guarded_admission'])
+        with self.assertRaises(queue_bridge.BridgeError):
+            bridge.snapshot(THREAD)
+        with self.assertRaises(queue_bridge.QueueNotStarted):
+            bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
+        self.ipc.__exit__.assert_called_once()
+        self.transport.enqueue.assert_not_called()
 
     def test_snapshot_closes_reader_on_loaded_history_and_binding_rejection(self):
         for target in ('loaded', 'history', 'revalidate'):
