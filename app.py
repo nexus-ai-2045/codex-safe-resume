@@ -190,6 +190,7 @@ class ScrollViewport:
     def __init__(self, root):
         self.focus_target = None
         self.focus_update = None
+        self.resize_pending = None
         self.layout_size = None
         self.canvas = tk.Canvas(root, background='#F3F6FA', highlightthickness=0,
                                 borderwidth=0)
@@ -202,9 +203,15 @@ class ScrollViewport:
         self.content = self.canvas.create_window(0, 0, window=self.body, anchor='nw')
         self.canvas.bind('<Configure>', self.resize, add='+')
         self.body.bind('<Configure>', self.resize, add='+')
+        root.bind('<Configure>', self.resize, add='+')
         root.bind('<FocusIn>', self.focus_changed, add='+')
 
     def resize(self, _event=None):
+        if self.resize_pending is None:
+            self.resize_pending = self.canvas.after_idle(self.update_layout)
+
+    def update_layout(self):
+        self.resize_pending = None
         width = max(1, self.canvas.winfo_width())
         visible = self.canvas.winfo_height()
         height = max(visible, self.body.winfo_reqheight())

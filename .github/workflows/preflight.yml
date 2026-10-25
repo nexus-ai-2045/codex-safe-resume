@@ -1,7 +1,6 @@
 name: preflight
 
 # 共通の入口（repo-preflight の preflight-gate）を SHA 固定で呼ぶ。
-# PIN_TBD: 下の 40桁 SHA は仮。repo-preflight の公開版（保護された v* タグから辿れる SHA）に差し替える。
 
 on:
   pull_request:
@@ -14,9 +13,9 @@ permissions:
 
 jobs:
   gate:
-    uses: nexus-ai-2045/repo-preflight/.github/workflows/preflight-gate.yml@44fdece1634d4afb355639ad465375dca5e5c868 # PIN_TBD vX.Y.Z
+    uses: nexus-ai-2045/repo-preflight/.github/workflows/preflight-gate.yml@0915c2decb63762260c8063d79419aef6ee9db34
     with:
-      preflight-ref: 44fdece1634d4afb355639ad465375dca5e5c868 # PIN_TBD（uses の @ と同じ SHA）
+      preflight-ref: 0915c2decb63762260c8063d79419aef6ee9db34
   # 必須にするのはこの集約ジョブ。if: で飛ばしても skipped は成功にならず赤になる
   all-green:
     if: always()

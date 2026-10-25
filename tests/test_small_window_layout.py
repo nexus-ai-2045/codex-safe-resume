@@ -14,10 +14,15 @@ class SmallWindowLayout(unittest.TestCase):
         except tk.TclError as exc:
             self.skipTest(str(exc))
         # Keep real mapped Tk geometry, without placing test windows over user work.
+        if getattr(self, "tk_scaling", None) is not None:
+            previous_scaling = self.root.tk.call("tk", "scaling")
+            self.root.tk.call("tk", "scaling", self.tk_scaling)
         self.root.withdraw()
         self.root.overrideredirect(True)
         self.root.attributes('-alpha', 0.0)
         self.addCleanup(self.root.destroy)
+        if getattr(self, "tk_scaling", None) is not None:
+            self.addCleanup(self.root.tk.call, "tk", "scaling", previous_scaling)
         self.root.title('Safe Resume layout regression')
         self.gui = app.GUI.__new__(app.GUI)
         self.gui.root = self.root
@@ -107,6 +112,7 @@ class SmallWindowLayout(unittest.TestCase):
         for name in ('details', 'status', 'tray_state', 'auto_status', 'plan_note'):
             getattr(self.gui, name).set('表示確認')
         self.settle(1060, 700)
+        self.settle(1060, max(700, viewport.body.winfo_reqheight() + 20))
         self.assertEqual(viewport.canvas.yview(), (0.0, 1.0))
         self.assertTrue(self.gui.tree.cget('xscrollcommand'))
         self.assertTrue(self.gui.tree.cget('yscrollcommand'))
@@ -157,3 +163,6 @@ class SmallWindowLayout(unittest.TestCase):
         self.flush()
         self.assertEqual(viewport.ensure_visible.call_args.args,
                          (self.gui.target_toggle,))
+
+class ScaledSmallWindowLayout(SmallWindowLayout):
+    tk_scaling = 1.5
