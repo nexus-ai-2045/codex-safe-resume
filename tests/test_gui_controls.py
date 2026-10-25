@@ -438,6 +438,33 @@ class GuiControls(unittest.TestCase):
             self.assertNotIn('private failure', dialogs.showwarning.call_args.args[1])
             gui.write.assert_not_called()
 
+    def test_confirmed_shutdown_stops_mainloop_before_destroy(self):
+        gui = self.gui()
+        events = []
+        gui.db, gui.tray = Mock(), Mock()
+        gui.tray.stop.side_effect = lambda: events.append('tray_stop')
+        gui.db.close.side_effect = lambda: events.append('db_close')
+        gui.root.quit.side_effect = lambda: events.append('loop_quit')
+        gui.root.destroy.side_effect = lambda: events.append('destroy')
+        with patch('app.set_auto_watch', side_effect=lambda *args: events.append('off')), patch(
+                'queue_state.pending', return_value=[]):
+            gui.quit_app()
+        self.assertEqual(events, ['off', 'tray_stop', 'db_close', 'loop_quit', 'destroy'])
+
+    def test_unconfirmed_shutdown_never_exits_mainloop(self):
+        gui = self.gui()
+        gui.db = Mock()
+        gui.closing = True
+        gui.shutdown_started = True
+        gui.shutdown_result = app.queue.Queue()
+        gui.shutdown_result.put(False)
+        gui.hold_quit = Mock()
+        gui.finish_quit()
+        gui.hold_quit.assert_called_once()
+        gui.db.close.assert_not_called()
+        gui.root.quit.assert_not_called()
+        gui.root.destroy.assert_not_called()
+
     def test_shutdown_wait_is_visible_and_does_not_claim_exit(self):
         gui = self.gui()
         gui.closing = False
@@ -451,6 +478,7 @@ class GuiControls(unittest.TestCase):
         self.assertIn('終了処理中', gui.root.title.call_args.args[0])
         gui.root.destroy.assert_not_called()
         self.assertIn(call(100, gui.finish_quit), gui.root.after.call_args_list)
+        gui.root.quit.assert_not_called()
 
     def test_selection_summary_omits_ids_and_absolute_paths(self):
         gui = self.gui()

@@ -1879,6 +1879,8 @@ class GUI:
                 self.hold_quit('常駐アイコンを終了できません。アプリは終了していません。')
                 return
         self.db.close()
+        # Native tray teardown and Tk's own mainloop have separate stop flags.
+        self.root.quit()
         self.root.destroy()
 
     def run(self): self.root.mainloop()
