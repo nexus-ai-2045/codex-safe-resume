@@ -78,3 +78,19 @@ class ViewportScrollContract(unittest.TestCase):
         view.body.winfo_height = lambda: 700
         view.resize()
         view.canvas.configure.assert_called_with(scrollregion=(0, 0, 100, 700))
+
+    def test_settled_focus_does_not_override_manual_scroll_when_extent_changes(self):
+        view = self.viewport()
+        view.canvas.yview.return_value = (0.0, 0.42)
+        view.focus_target = object()
+        view.layout_size = (100, 1000, 420, 1000)
+        view.resize()
+        view.canvas.after.assert_not_called()
+        view.canvas.yview_moveto.assert_not_called()
+
+    def test_child_configure_events_share_one_idle_resize(self):
+        view = self.viewport()
+        view.resize_pending = None
+        view.schedule_resize()
+        view.schedule_resize()
+        view.canvas.after_idle.assert_called_once_with(view.resize)

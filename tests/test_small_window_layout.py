@@ -14,10 +14,15 @@ class SmallWindowLayout(unittest.TestCase):
         except tk.TclError as exc:
             self.skipTest(str(exc))
         # Keep real mapped Tk geometry, without placing test windows over user work.
+        if getattr(self, "tk_scaling", None) is not None:
+            previous_scaling = self.root.tk.call("tk", "scaling")
+            self.root.tk.call("tk", "scaling", self.tk_scaling)
         self.root.withdraw()
         self.root.overrideredirect(True)
         self.root.attributes('-alpha', 0.0)
         self.addCleanup(self.root.destroy)
+        if getattr(self, "tk_scaling", None) is not None:
+            self.addCleanup(self.root.tk.call, "tk", "scaling", previous_scaling)
         self.root.title('Safe Resume layout regression')
         self.gui = app.GUI.__new__(app.GUI)
         self.gui.root = self.root
@@ -113,6 +118,7 @@ class SmallWindowLayout(unittest.TestCase):
         for name in ('details', 'status', 'tray_state', 'auto_status', 'plan_note'):
             getattr(self.gui, name).set('表示確認')
         self.settle(1060, 700)
+        self.settle(1060, max(700, viewport.body.winfo_reqheight() + 20))
         self.assertEqual(viewport.canvas.yview(), (0.0, 1.0))
         self.assertTrue(self.gui.tree.cget('xscrollcommand'))
         self.assertTrue(self.gui.tree.cget('yscrollcommand'))
@@ -131,6 +137,23 @@ class SmallWindowLayout(unittest.TestCase):
         self.gui.viewport.canvas.yview_moveto(0)
         self.flush()
         self.assertEqual(self.gui.viewport.canvas.yview()[0], 0)
+
+    def test_dynamic_label_growth_updates_scroll_extent(self):
+        self.settle(620, 420)
+        self.gui.details.set("短い説明")
+        self.flush()
+        self.gui.details.set("\n".join("増えた説明" for _ in range(30)))
+        self.flush()
+        viewport = self.gui.viewport
+        requested = viewport.body.winfo_reqheight()
+        self.assertGreater(requested, viewport.canvas.winfo_height())
+        region = tuple(map(float, self.root.tk.splitlist(viewport.canvas.cget("scrollregion"))))
+        self.assertGreaterEqual(region[3] - region[1], requested)
+        self.assertGreaterEqual(viewport.body.winfo_height(), requested)
+        viewport.canvas.yview_moveto(1)
+        self.flush()
+        self.assert_visible(self.gui.target_toggle)
+        self.assert_visible(self.gui.navigation_button)
 
     def test_pending_focus_update_ignores_destroyed_control(self):
         self.settle(620, 420)
@@ -163,3 +186,7 @@ class SmallWindowLayout(unittest.TestCase):
         self.flush()
         self.assertEqual(viewport.ensure_visible.call_args.args,
                          (self.gui.target_toggle,))
+
+
+class ScaledSmallWindowLayout(SmallWindowLayout):
+    tk_scaling = 1.5

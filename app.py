@@ -191,6 +191,7 @@ class ScrollViewport:
         self.focus_target = None
         self.fresh_focus = False
         self.focus_update = None
+        self.resize_pending = None
         self.layout_size = None
         self.canvas = tk.Canvas(root, background='#F3F6FA', highlightthickness=0,
                                 borderwidth=0)
@@ -201,17 +202,25 @@ class ScrollViewport:
         self.scrollbar.grid(row=0, column=1, sticky='ns')
         self.body = ttk.Frame(self.canvas, style='Main.TFrame')
         self.content = self.canvas.create_window(0, 0, window=self.body, anchor='nw')
-        self.canvas.bind('<Configure>', self.resize, add='+')
-        self.body.bind('<Configure>', self.resize, add='+')
+        self.canvas.bind('<Configure>', self.schedule_resize, add='+')
+        self.body.bind('<Configure>', self.schedule_resize, add='+')
+        root.bind('<Configure>', self.schedule_resize, add='+')
         root.bind('<FocusIn>', self.focus_changed, add='+')
 
+    def schedule_resize(self, _event=None):
+        if self.resize_pending is None:
+            self.resize_pending = self.canvas.after_idle(self.resize)
+
     def resize(self, _event=None):
+        self.resize_pending = None
         width = max(1, self.canvas.winfo_width())
         visible = self.canvas.winfo_height()
         height = max(visible, self.body.winfo_reqheight())
         actual = self.body.winfo_height()
         if self.layout_size == (width, height, visible, actual):
             return
+        previous = self.layout_size
+        bounds_changed = previous is None or (previous[0], previous[2]) != (width, visible)
         self.layout_size = (width, height, visible, actual)
         first, last = self.canvas.yview()
         at_bottom = first > 0 and last >= 1
@@ -230,7 +239,8 @@ class ScrollViewport:
             return
         # Wrapping can change the focused control's position after FocusIn.
         # Restore visibility when dimensions settle, not on manual scrolling.
-        if self.focus_target is not None and self.focus_update is None:
+        if (self.focus_target is not None and self.focus_update is None
+                and (self.fresh_focus or bounds_changed)):
             self.focus_update = self.canvas.after(30, self.restore_focus_visibility)
 
     def restore_focus_visibility(self):

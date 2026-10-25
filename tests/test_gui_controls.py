@@ -74,12 +74,15 @@ class GuiControls(unittest.TestCase):
         gui = self.gui()
         self.build(gui)
         for label in gui.wrap_labels:
+            label.bind.assert_any_call('<Configure>', gui.resize_label_text, add='+')
             label.reset_mock()
             gui.resize_label_text(SimpleNamespace(widget=label, width=900))
             self.assertEqual(label.configure.call_args.kwargs['wraplength'], 896)
             gui.resize_label_text(SimpleNamespace(widget=label, width=360))
             self.assertEqual(label.configure.call_args.kwargs['wraplength'], 356)
-        self.assertNotIn('<Configure>', [call.args[0] for call in gui.root.bind.call_args_list])
+        self.assertEqual(
+            [binding for binding in gui.root.bind.call_args_list if binding.args[0] == '<Configure>'],
+            [call('<Configure>', gui.viewport.schedule_resize, add='+')])
 
     def test_settings_menu_names_explain_effect_without_automatic_execution(self):
         gui = self.gui()
