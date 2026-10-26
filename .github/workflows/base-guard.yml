@@ -5,7 +5,7 @@ name: base-guard
 # 赤にするもの: 検査を変えるパス（.github/・.githooks/・.repo-preflight/・.gitleaks.toml など）の変更、
 # preflight-gate の呼び出し先の owner/リポ違い、uses の @ と preflight-ref の不一致、呼び出しの削除、
 # 版のタグ（v*）から辿れない SHA（フォーク網の SHA）。タグは ruleset で保護する（人の GO が要る設定）。
-# PIN_TBD: PREFLIGHT_REF の 40桁 SHA は仮。preflight.yml と同じ公開版の SHA に差し替える。
+# 固定先: PREFLIGHT_REF は repo-preflight v0.10.0（preflight.yml と同じ公開版の SHA）。
 # ruleset の必須チェック名は「base-guard」。job の name と一致させる。
 
 on:
@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 10
     env:
       PYTHONUTF8: "1"
-      PREFLIGHT_REF: 44fdece1634d4afb355639ad465375dca5e5c868 # PIN_TBD
+      PREFLIGHT_REF: 5b7c774deb8e9abcf0fce0c5f39ec1c1f3a894f3 # v0.10.0
     steps:
       - name: Require pinned repo-preflight SHA
         run: '[[ "$PREFLIGHT_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "PREFLIGHT_REF には 40桁の commit SHA を書いてください" >&2; exit 1; }'
