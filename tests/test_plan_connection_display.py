@@ -16,6 +16,11 @@ def response(plan='pro', account='private-account'):
 
 
 class PlanDisplay(unittest.TestCase):
+    def setUp(self):
+        validation = patch('app.validate_executable', return_value='fixture')
+        validation.start()
+        self.addCleanup(validation.stop)
+
     def read(self, primary, peer=None):
         return fixture.UsageClientTests().read(result=primary, peer_reply=peer)[0]
 
@@ -174,7 +179,8 @@ class PlanDisplay(unittest.TestCase):
         read.assert_called_once_with('fixture', peer_reply=None)
 
     def test_changed_cli_is_rejected_before_either_connection(self):
-        with patch('app.usage_executable', side_effect=ValueError), \
+        with patch('app.validate_executable', side_effect=ValueError), \
+                patch('app.usage_executable', side_effect=ValueError), \
                 patch('app.DesktopBridge') as bridge, patch('app.read_limits') as read:
             with self.assertRaises(ValueError): app.read_usage_status({'mode': 'prepared'})
         bridge.assert_not_called()
@@ -189,7 +195,7 @@ class PlanDisplay(unittest.TestCase):
                 probe.__exit__ = Mock(return_value=False)
                 probe.quota.return_value = response()
                 bridge_value = ValueError('pin changed') if shared_error else None
-                with patch('app.usage_executable', side_effect=['fixture', ValueError('pin changed')]), \
+                with patch('app.usage_executable', side_effect=ValueError('pin changed')), \
                         patch('app.DesktopBridge', return_value=probe, side_effect=bridge_value), \
                         patch('app.read_limits') as read:
                     with self.assertRaises(ValueError):

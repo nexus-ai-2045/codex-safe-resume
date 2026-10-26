@@ -1,5 +1,6 @@
 """実GUIなしで、画面内の操作配置・明示操作・常駐準備の境界を検証する。"""
 import re
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ class GuiControls(unittest.TestCase):
 
     def gui(self):
         gui = app.GUI.__new__(app.GUI)
+        gui.closing, gui.tray, gui.window_hidden = False, None, False
         gui.root = Mock()
         gui.root.winfo_screenwidth.return_value = 800
         gui.root.winfo_screenheight.return_value = 600
@@ -61,7 +63,9 @@ class GuiControls(unittest.TestCase):
         ttk = SimpleNamespace(**{name: factory(name) for name in
                               ('Frame', 'Label', 'Button', 'Entry', 'Combobox',
                                'Treeview', 'Scrollbar', 'Menubutton', 'Radiobutton', 'Checkbutton')})
-        tk = SimpleNamespace(StringVar=Mock, BooleanVar=Mock, Text=factory('Text'), Menu=factory('Menu'))
+        tk = SimpleNamespace(StringVar=lambda **kwargs: Mock(get=Mock(return_value=kwargs.get('value', ''))),
+                             BooleanVar=Mock, Text=factory('Text'),
+                             Menu=factory('Menu'), Canvas=factory('Canvas'))
         with patch('app.ttk', ttk), patch('app.tk', tk), patch('app.QuotaCards'):
             gui.build()
         return records
@@ -70,12 +74,15 @@ class GuiControls(unittest.TestCase):
         gui = self.gui()
         self.build(gui)
         for label in gui.wrap_labels:
+            label.bind.assert_any_call('<Configure>', gui.resize_label_text, add='+')
             label.reset_mock()
             gui.resize_label_text(SimpleNamespace(widget=label, width=900))
-            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 900)
+            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 896)
             gui.resize_label_text(SimpleNamespace(widget=label, width=360))
-            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 360)
-        self.assertNotIn('<Configure>', [call.args[0] for call in gui.root.bind.call_args_list])
+            self.assertEqual(label.configure.call_args.kwargs['wraplength'], 356)
+        self.assertEqual(
+            [binding for binding in gui.root.bind.call_args_list if binding.args[0] == '<Configure>'],
+            [call('<Configure>', gui.viewport.schedule_resize, add='+')])
 
     def test_settings_menu_names_explain_effect_without_automatic_execution(self):
         gui = self.gui()
@@ -85,7 +92,10 @@ class GuiControls(unittest.TestCase):
         entries = {call.kwargs['label']: call.kwargs.get('command')
                    for call in menus[0].add_command.call_args_list}
         self.assertIn('一覧と利用枠を再取得（送信しない）', entries)
-        self.assertIn('再開用の接続状態を確認…', entries)
+        self.assertIn('接続を確認・再設定（同意が必要）…', entries)
+        self.assertEqual(set(entries), {'接続を確認・再設定（同意が必要）…', '利用枠の詳細（送信しない）',
+                                        '一覧と利用枠を再取得（送信しない）', 'アプリを終了'})
+        self.assertIs(entries['接続を確認・再設定（同意が必要）…'], gui.reconnect_auto_watch)
         self.assertFalse(any('開き直' in label for label in entries))
         gui.reconnect_auto_watch.assert_not_called()
         gui.setup_connection.assert_not_called()
@@ -94,19 +104,21 @@ class GuiControls(unittest.TestCase):
         gui.reconnect_auto_watch.assert_not_called()
 
     def settings_menu(self, records):
+        return self.named_menu(records, '設定')
+
+    def named_menu(self, records, label):
         buttons = [widget for kind, widget, _, options in records
-                   if kind == 'Menubutton' and options.get('text') == '設定']
+                   if kind == 'Menubutton' and options.get('text') == label]
         self.assertEqual(len(buttons), 1)
         menu = buttons[0].configure.call_args.kwargs['menu']
         self.assertIn(menu, [widget for kind, widget, _, _ in records if kind == 'Menu'])
         return menu
 
-    def test_設定のチャット別操作は正しいハンドラと引数で実行する(self):
+    def test_選択チャットの操作は正しいハンドラと引数で実行する(self):
         gui = self.gui()
         actions = Mock()
         expected = {
-            '実行・監視中を上に戻す': ('prioritize_active', ()),
-            '選択したチャットだけON': ('toggle', (True,)),
+            '選択したチャットを対象にする': ('toggle', (True,)),
             '完了として記録（監視を終了）': ('finish', ('completed',)),
             '要確認として記録（自動再開を停止）': ('finish', ('blocked',)),
             '確認して選び直す（試行履歴は保持）': ('review_reset', ()),
@@ -114,7 +126,7 @@ class GuiControls(unittest.TestCase):
         }
         for name, _ in expected.values():
             setattr(gui, name, getattr(actions, name))
-        menu = self.settings_menu(self.build(gui))
+        menu = self.named_menu(self.build(gui), '選択チャットの操作')
         self.assertEqual(actions.mock_calls, [], 'メニューの作成だけでは操作しません')
         commands = menu.add_command.call_args_list
         labels = [entry.kwargs['label'] for entry in commands]
@@ -124,51 +136,40 @@ class GuiControls(unittest.TestCase):
                 actions.reset_mock()
                 commands[labels.index(label)].kwargs['command']()
                 self.assertEqual(actions.mock_calls, [getattr(call, name)(*args)])
-        section = commands[labels.index('チャット別の操作')]
-        self.assertEqual(section.kwargs['state'], 'disabled')
-        self.assertNotIn('command', section.kwargs)
-        section_index = menu.mock_calls.index(call.add_command(label='チャット別の操作', state='disabled'))
-        self.assertEqual(menu.mock_calls[section_index - 1], call.add_separator())
-        last_index = next(i for i, entry in enumerate(menu.mock_calls)
-                          if entry.kwargs.get('label') == '詳細情報（ID・場所）')
-        self.assertEqual(menu.mock_calls[last_index + 1], call.add_separator())
-        for label in expected:
-            index = next(i for i, entry in enumerate(menu.mock_calls)
-                         if entry.kwargs.get('label') == label)
-            self.assertLess(section_index, index)
-            self.assertLessEqual(index, last_index)
+        settings = self.settings_menu(self.build(gui))
+        self.assertFalse(set(expected) & {entry.kwargs['label'] for entry in settings.add_command.call_args_list})
 
-    def test_手順書が参照する設定の操作名は画面に実在する(self):
+    def test_documented_menu_locations_match_visible_controls(self):
         gui = self.gui()
-        menu = self.settings_menu(self.build(gui))
-        labels = {entry.kwargs['label'] for entry in menu.add_command.call_args_list
-                  if callable(entry.kwargs.get('command')) and entry.kwargs.get('state') != 'disabled'}
+        records = self.build(gui)
         root = Path(__file__).resolve().parents[1]
         paths = sorted(root.glob('*.md')) + sorted((root / 'docs').rglob('*.md'))
         paths += sorted((root / 'packaging').rglob('*.md'))
-        references = {}
-        for path in paths:
-            operations = re.findall(r'「設定」(?:→|の)「([^」]+)」', path.read_text(encoding='utf-8'))
-            references[path] = set(operations)
-            for operation in operations:
-                with self.subTest(文書=str(path.relative_to(root)), 操作=operation):
-                    self.assertIn(operation, labels, '手順書の操作名を設定メニューと合わせてください')
-        acceptance = references[root / 'docs' / '実機受入手順.md']
-        self.assertTrue({
-            '実行・監視中を上に戻す', '選択したチャットだけON',
-            '完了として記録（監視を終了）', '要確認として記録（自動再開を停止）',
-            '確認して選び直す（試行履歴は保持）', '詳細情報（ID・場所）',
-        } <= acceptance, '受入手順には復旧した６操作を記載してください')
+        for menu_label in ('設定', '選択チャットの操作'):
+            menu = self.named_menu(records, menu_label)
+            labels = {entry.kwargs['label'] for entry in menu.add_command.call_args_list
+                      if callable(entry.kwargs.get('command'))}
+            for path in paths:
+                operations = re.findall('「' + menu_label + '」(?:→|の)「([^」]+)」', path.read_text(encoding='utf-8'))
+                for operation in operations:
+                    with self.subTest(文書=str(path.relative_to(root)), 操作=operation):
+                        self.assertIn(operation, labels)
+        acceptance = (root / 'docs' / '実機受入手順.md').read_text(encoding='utf-8')
+        selected_labels = {entry.kwargs['label'] for entry in self.named_menu(
+            records, '選択チャットの操作').add_command.call_args_list}
+        documented = set(re.findall(r'「選択チャットの操作」(?:→|の)「([^」]+)」', acceptance))
+        self.assertTrue(selected_labels <= documented, '受入手順に選択チャットの全操作を記載してください')
+        self.assertIn('実行・監視中を上に戻す', acceptance)
 
     def test_行が未選択のメニュー操作は日本語で案内して状態を変えない(self):
         gui = self.gui()
         gui.db, gui.refresh, gui.write = Mock(), Mock(), Mock()
-        menu = self.settings_menu(self.build(gui))
+        menu = self.named_menu(self.build(gui), '選択チャットの操作')
         gui.selected = Mock(return_value=None)
         entries = {entry.kwargs['label']: entry.kwargs.get('command')
                    for entry in menu.add_command.call_args_list}
         with patch('app.messagebox') as dialogs, patch('app.enable') as enable, patch('app.mark') as mark:
-            for label in ('選択したチャットだけON', '完了として記録（監視を終了）',
+            for label in ('選択したチャットを対象にする', '完了として記録（監視を終了）',
                           '要確認として記録（自動再開を停止）',
                           '確認して選び直す（試行履歴は保持）', '詳細情報（ID・場所）'):
                 with self.subTest(操作=label):
@@ -204,12 +205,12 @@ class GuiControls(unittest.TestCase):
         gui = self.gui()
         gui.db = fixture.db
         gui.refresh, gui.write = Mock(), Mock()
-        menu = self.settings_menu(self.build(gui))
+        menu = self.named_menu(self.build(gui), '選択チャットの操作')
         gui.selected = Mock(return_value=tid)
         entries = {entry.kwargs['label']: entry.kwargs.get('command')
                    for entry in menu.add_command.call_args_list}
         other_before = next(row for row in core.list_threads(gui.db) if row['id'] == other)
-        entries['選択したチャットだけON']()
+        entries['選択したチャットを対象にする']()
         self.assertTrue(next(row for row in core.list_threads(gui.db) if row['id'] == tid)['enabled'])
         for label, state in (('完了として記録（監視を終了）', 'completed'),
                              ('要確認として記録（自動再開を停止）', 'blocked')):
@@ -224,7 +225,7 @@ class GuiControls(unittest.TestCase):
                 row = next(row for row in core.list_threads(gui.db) if row['id'] == tid)
                 self.assertEqual(row['state'], state)
                 self.assertFalse(row['enabled'])
-                entries['選択したチャットだけON']()
+                entries['選択したチャットを対象にする']()
                 self.assertEqual(next(row for row in core.list_threads(gui.db) if row['id'] == tid), row)
         self.assertEqual(auto_watch.status(gui.db), policy)
         self.assertFalse(policy['enabled'])
@@ -265,15 +266,219 @@ class GuiControls(unittest.TestCase):
         gui.toggle_auto_watch = Mock()
         records = self.build(gui)
         buttons = {options.get('text'): (widget, options) for kind, widget, _, options in records if kind == 'Button'}
-        self.assertEqual(set(buttons), {'自動再開をON', '接続の確認・修復…', '一覧・利用枠を更新'})
+        self.assertEqual(set(buttons), {
+            '自動再開をON', '接続の確認・修復…', '一覧・利用枠を更新',
+            '詳細表示（プロジェクト・並べ替え）', '実行・監視中を上に戻す', 'Codexで開く'})
         buttons['自動再開をON'][1]['command']()
         gui.toggle_auto_watch.assert_called_once()
         orientations = {options['orient'] for kind, _, _, options in records if kind == 'Scrollbar'}
         self.assertEqual(orientations, {'horizontal', 'vertical'})
-        self.assertNotIn('<Double-1>', [call.args[0] for call in gui.tree.bind.call_args_list])
+        self.assertIn('<Double-1>', [call.args[0] for call in gui.tree.bind.call_args_list])
         weighted_rows = [call for call in gui.root.rowconfigure.call_args_list if call.kwargs.get('weight') == 1]
         self.assertEqual(len(weighted_rows), 1)
 
+
+    def test_views_start_with_all_and_explain_detected_scope(self):
+        gui = self.gui()
+        records = self.build(gui)
+        self.assertEqual(gui.view_filter.get(), 'すべて')
+        labels = [options.get('text') for kind, _, _, options in records if kind == 'Radiobutton']
+        self.assertEqual(labels, ['すべて', '解除待ち・再開中', '確認が必要'])
+        notes = [options.get('text', '') for kind, _, _, options in records if kind == 'Label']
+        self.assertTrue(any('検出済み' in note and '全履歴' in note for note in notes))
+
+    def test_filters_separate_pending_state_from_historical_limits_and_blocked(self):
+        from tests.test_resume_list import ResumeList
+        fixture = ResumeList()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        waiting = {fixture.add(i, state, state=state) for i, state in enumerate(
+            ('waiting', 'claimed', 'dispatched', 'monitoring'), 1)}
+        historical = fixture.add(5, '過去の停止', limited=True)
+        blocked = fixture.add(6, '要確認', limited=True, state='blocked')
+        completed = fixture.add(7, '完了', limited=True, state='completed')
+        fixture.gui.view_filter = Mock()
+        for view, expected in [('すべて', waiting | {historical, blocked, completed}),
+                               ('解除待ち・再開中', waiting), ('確認が必要', {blocked})]:
+            fixture.gui.view_filter.get.return_value = view
+            fixture.gui.tree.insert.reset_mock()
+            fixture.gui.render_rows()
+            self.assertEqual(set(fixture.order()), expected)
+        self.assertEqual(app.GUI.row_status({'state': 'unknown'}, {}), '再開処理なし')
+
+    def test_navigation_is_explicit_and_double_click_only_opens_actual_clicked_row(self):
+        gui = self.gui()
+        self.build(gui)
+        gui.rows = [dict(id='clicked-id', title='対象', cwd='', state='idle', auto_excluded=False)]
+        gui.tree.selection.return_value = ('previous-id',)
+        gui.db, gui.write, gui.toggle, gui.change_target, gui.finish = Mock(), Mock(), Mock(), Mock(), Mock()
+        error = type('ThreadNavigationError', (Exception,), {})
+        navigator = SimpleNamespace(open_thread=Mock(), ThreadNavigationError=error)
+        with patch.dict(sys.modules, {'thread_navigation': navigator}):
+            for region, row in [('heading', 'clicked-id'), ('nothing', ''), ('cell', ''), ('separator', 'clicked-id')]:
+                gui.tree.identify_region.return_value = region
+                gui.tree.identify_row.return_value = row
+                gui.open_selected_chat(SimpleNamespace(x=2, y=3))
+            navigator.open_thread.assert_not_called()
+            gui.tree.identify_region.return_value = 'cell'
+            gui.tree.identify_row.return_value = 'clicked-id'
+            gui.tree.selection_set.side_effect = lambda tid: setattr(gui.tree.selection, 'return_value', (tid,))
+            gui.open_selected_chat(SimpleNamespace(x=2, y=3))
+            gui.navigation_thread.join(1)
+            gui.drain_navigation()
+            self.assertEqual(navigator.open_thread.call_args.args, ('clicked-id',))
+            self.assertIn('対象', gui.details.set.call_args.args[0])
+            gui.tree.selection_set.assert_called_with('clicked-id')
+            self.assertIn('要求しました', gui.write.call_args.args[0])
+            gui.db.execute.assert_not_called()
+            gui.toggle.assert_not_called()
+            gui.change_target.assert_not_called()
+            gui.finish.assert_not_called()
+
+    def test_open_button_handles_no_selection_and_fixed_navigation_failure(self):
+        gui = self.gui()
+        records = self.build(gui)
+        open_button = next(options['command'] for kind, _, _, options in records
+                           if kind == 'Button' and options.get('text') == 'Codexで開く')
+        gui.selected = Mock(return_value=None)
+        gui.write = Mock()
+        error = type('ThreadNavigationError', (Exception,), {})
+        navigator = SimpleNamespace(open_thread=Mock(side_effect=error('private failure')), ThreadNavigationError=error)
+        with patch.dict(sys.modules, {'thread_navigation': navigator}), patch('app.messagebox') as dialogs:
+            open_button()
+            navigator.open_thread.assert_not_called()
+            dialogs.showinfo.assert_called_once()
+            gui.selected.return_value = 'selected-id'
+            open_button()
+            gui.navigation_thread.join(1)
+            gui.drain_navigation()
+            self.assertEqual(navigator.open_thread.call_args.args, ('selected-id',))
+            dialogs.showwarning.assert_called_once()
+            self.assertNotIn('private failure', dialogs.showwarning.call_args.args[1])
+            gui.write.assert_not_called()
+
+    def test_navigation_returns_while_worker_waits_and_rejects_duplicate_requests(self):
+        gui = self.gui()
+        self.build(gui)
+        gui.selected = Mock(return_value='first')
+        gui.write = Mock()
+        entered, release = threading.Event(), threading.Event()
+        worker_threads = []
+        def open_thread(tid, *, before_open=lambda: True):
+            worker_threads.append(threading.get_ident())
+            entered.set()
+            release.wait(1)
+            self.assertTrue(before_open())
+        navigator = SimpleNamespace(open_thread=Mock(side_effect=open_thread),
+                                    ThreadNavigationError=type('ThreadNavigationError', (Exception,), {}))
+        with patch.dict(sys.modules, {'thread_navigation': navigator}):
+            try:
+                gui.open_selected_chat()
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(gui.navigation_pending)
+                self.assertNotIn(threading.get_ident(), worker_threads)
+                gui.navigation_button.configure.assert_called_with(state='disabled')
+                gui.selected.return_value = 'second'
+                gui.open_selected_chat()
+                self.assertEqual(navigator.open_thread.call_count, 1)
+                gui.write.assert_not_called()
+            finally:
+                release.set()
+                if hasattr(gui, 'navigation_thread'):
+                    gui.navigation_thread.join(1)
+            gui.drain_navigation()
+            self.assertFalse(gui.navigation_pending)
+            gui.navigation_button.configure.assert_called_with(state='normal')
+            gui.write.assert_called_once()
+
+    def test_quit_cancels_pending_dispatch_and_waits_for_navigation_worker(self):
+        gui = self.gui()
+        self.build(gui)
+        gui.selected = Mock(return_value='first')
+        gui.write, gui.db = Mock(), Mock()
+        entered, release, dispatched = threading.Event(), threading.Event(), threading.Event()
+        def open_thread(tid, *, before_open=lambda: True):
+            entered.set()
+            release.wait(1)
+            if before_open():
+                dispatched.set()
+        navigator = SimpleNamespace(open_thread=Mock(side_effect=open_thread),
+                                    ThreadNavigationError=type('ThreadNavigationError', (Exception,), {}))
+        with patch.dict(sys.modules, {'thread_navigation': navigator}), patch('app.set_auto_watch'), patch(
+                'queue_state.pending', return_value=[]):
+            try:
+                gui.open_selected_chat()
+                self.assertTrue(entered.wait(1))
+                gui.quit_app()
+                self.assertTrue(gui.navigation_cancel.is_set())
+                gui.root.destroy.assert_not_called()
+                self.assertIn(call(100, gui.finish_quit), gui.root.after.call_args_list)
+            finally:
+                release.set()
+                if hasattr(gui, 'navigation_thread'):
+                    gui.navigation_thread.join(1)
+            gui.finish_quit()
+            gui.root.destroy.assert_called_once()
+            self.assertFalse(dispatched.is_set())
+            gui.write.assert_not_called()
+
+    def test_unexpected_navigation_failure_restores_pending_controls(self):
+        gui = self.gui()
+        self.build(gui)
+        gui.selected, gui.write = Mock(return_value='first'), Mock()
+        navigator = SimpleNamespace(open_thread=Mock(side_effect=RuntimeError('private failure')),
+                                    ThreadNavigationError=type('ThreadNavigationError', (Exception,), {}))
+        with patch.dict(sys.modules, {'thread_navigation': navigator}), patch('app.messagebox') as dialogs:
+            gui.open_selected_chat()
+            gui.navigation_thread.join(1)
+            gui.drain_navigation()
+            self.assertFalse(gui.navigation_pending)
+            gui.navigation_button.configure.assert_called_with(state='normal')
+            dialogs.showwarning.assert_called_once()
+            self.assertNotIn('private failure', dialogs.showwarning.call_args.args[1])
+            gui.write.assert_not_called()
+
+    def test_confirmed_shutdown_stops_mainloop_before_destroy(self):
+        gui = self.gui()
+        events = []
+        gui.db, gui.tray = Mock(), Mock()
+        gui.tray.stop.side_effect = lambda: events.append('tray_stop')
+        gui.db.close.side_effect = lambda: events.append('db_close')
+        gui.root.quit.side_effect = lambda: events.append('loop_quit')
+        gui.root.destroy.side_effect = lambda: events.append('destroy')
+        with patch('app.set_auto_watch', side_effect=lambda *args: events.append('off')), patch(
+                'queue_state.pending', return_value=[]):
+            gui.quit_app()
+        self.assertEqual(events, ['off', 'tray_stop', 'db_close', 'loop_quit', 'destroy'])
+
+    def test_unconfirmed_shutdown_never_exits_mainloop(self):
+        gui = self.gui()
+        gui.db = Mock()
+        gui.closing = True
+        gui.shutdown_started = True
+        gui.shutdown_result = app.queue.Queue()
+        gui.shutdown_result.put(False)
+        gui.hold_quit = Mock()
+        gui.finish_quit()
+        gui.hold_quit.assert_called_once()
+        gui.db.close.assert_not_called()
+        gui.root.quit.assert_not_called()
+        gui.root.destroy.assert_not_called()
+
+    def test_shutdown_wait_is_visible_and_does_not_claim_exit(self):
+        gui = self.gui()
+        gui.closing = False
+        gui.db, gui.tray = Mock(), None
+        gui.monitor_thread = Mock(is_alive=Mock(return_value=True))
+        gui.auto_status, gui.status = Mock(), Mock()
+        with patch('app.set_auto_watch'):
+            gui.quit_app()
+        self.assertIn('終了処理中', gui.auto_status.set.call_args.args[0])
+        self.assertIn('OFF', gui.auto_status.set.call_args.args[0])
+        self.assertIn('終了処理中', gui.root.title.call_args.args[0])
+        gui.root.destroy.assert_not_called()
+        self.assertIn(call(100, gui.finish_quit), gui.root.after.call_args_list)
+        gui.root.quit.assert_not_called()
 
     def test_selection_summary_omits_ids_and_absolute_paths(self):
         gui = self.gui()
@@ -285,12 +490,24 @@ class GuiControls(unittest.TestCase):
         self.assertNotIn('/private/parent', text)
         self.assertIn('タイトル', text)
 
+    def test_mac_native_quit_uses_guarded_shutdown(self):
+        gui = self.gui()
+        gui.quit_app = Mock()
+        with patch('app.sys.platform', 'darwin'):
+            gui.configure_reopen()
+        callbacks = {item.args[0]: item.args[1] for item in gui.root.createcommand.call_args_list}
+        self.assertIn('tk::mac::Quit', callbacks)
+        callbacks['tk::mac::Quit']()
+        gui.quit_app.assert_called_once_with()
+
     def test_dock_reopen_restores_existing_window(self):
         gui = self.gui()
         with patch('app.sys.platform', 'darwin'):
             gui.configure_reopen()
-        gui.root.createcommand.assert_called_once_with('tk::mac::ReopenApplication', gui.show_window)
-        gui.root.createcommand.call_args.args[1]()
+        gui.root.createcommand.assert_has_calls([
+            call('tk::mac::ReopenApplication', gui.show_window),
+            call('tk::mac::Quit', gui.quit_app)])
+        gui.root.createcommand.call_args_list[0].args[1]()
         gui.root.deiconify.assert_called_once()
         gui.root.lift.assert_called_once()
 
@@ -306,6 +523,10 @@ class FakeIcon:
         self.run_called = threading.Event()
         self.exit_run = threading.Event()
         self.run_thread = None
+        self.menu_updates = 0
+
+    def update_menu(self):
+        self.menu_updates += 1
 
     def run_detached(self, setup=None):
         self.setup = setup
@@ -459,6 +680,7 @@ class TrayControls(unittest.TestCase):
     def test_tray_menu_enqueues_without_entering_tcl_from_native_callback(self):
         gui, icon = self.gui(), FakeIcon()
         pystray = self.start(gui, icon, 'darwin')
+        gui.root.state.return_value = 'withdrawn'
         gui.root.reset_mock()
         pystray.MenuItem.call_args_list[0].args[1](None, None)
         self.assertEqual(gui.root.mock_calls, [])
@@ -469,6 +691,7 @@ class TrayControls(unittest.TestCase):
     def test_worker_tray_callback_does_not_touch_tk(self):
         gui, icon = self.gui(), FakeIcon()
         pystray = self.start(gui, icon, 'win32')
+        gui.root.state.return_value = 'withdrawn'
         gui.root.reset_mock()
         worker = threading.Thread(target=pystray.MenuItem.call_args_list[0].args[1],
                                   args=(None, None))
@@ -478,6 +701,54 @@ class TrayControls(unittest.TestCase):
         self.assertEqual(gui.root.mock_calls, [])
         gui.drain_tray_actions()
         gui.root.deiconify.assert_called_once()
+
+    def test_tray_label_and_action_follow_hide_restore_and_minimize(self):
+        gui, icon = self.gui(), FakeIcon()
+        gui.root.state.return_value = 'normal'
+        gui.root.withdraw.side_effect = lambda: setattr(gui.root.state, 'return_value', 'withdrawn')
+        gui.root.deiconify.side_effect = lambda: setattr(gui.root.state, 'return_value', 'normal')
+        pystray = self.start(gui, icon, 'darwin')
+        label, action = pystray.MenuItem.call_args_list[0].args[:2]
+        self.assertEqual(label(None), 'トレイにしまう')
+        gui.root.reset_mock()
+        action(None, None)
+        self.assertEqual(gui.root.mock_calls, [])
+        gui.drain_tray_actions()
+        gui.root.withdraw.assert_called_once()
+        self.assertEqual(label(None), 'ウィンドウを開く')
+        self.assertEqual(icon.menu_updates, 1)
+        action(None, None)
+        gui.drain_tray_actions()
+        gui.root.deiconify.assert_called_once()
+        self.assertEqual(label(None), 'トレイにしまう')
+        self.assertEqual(icon.menu_updates, 2)
+        gui.root.state.return_value = 'iconic'
+        gui.sync_tray_window(SimpleNamespace(widget=gui.root))
+        self.assertEqual(label(None), 'ウィンドウを開く')
+
+    def test_native_label_reader_never_calls_tk(self):
+        gui, icon = self.gui(), FakeIcon()
+        gui.root.state.return_value = 'normal'
+        pystray = self.start(gui, icon, 'darwin')
+        label = pystray.MenuItem.call_args_list[0].args[0]
+        gui.root.reset_mock()
+        values = []
+        worker = threading.Thread(target=lambda: values.append(label(None)))
+        worker.start()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(values, ['トレイにしまう'])
+        self.assertEqual(gui.root.mock_calls, [])
+
+    def test_child_unmap_does_not_change_tray_label(self):
+        gui, icon = self.gui(), FakeIcon()
+        pystray = self.start(gui, icon, 'darwin')
+        label = pystray.MenuItem.call_args_list[0].args[0]
+        gui.root.reset_mock()
+        gui.sync_tray_window(SimpleNamespace(widget=object()))
+        self.assertEqual(gui.root.mock_calls, [])
+        self.assertEqual(label(None), 'トレイにしまう')
+        self.assertEqual(icon.menu_updates, 0)
 
     def test_queued_tray_actions_are_discarded_after_close(self):
         gui, icon = self.gui(), FakeIcon()

@@ -84,24 +84,31 @@ def create_tray_image(Image, ImageDraw):
 
 
 def usage_executable(config):
-    """表示専用の取得元。設定したCLIのpinを優先し、未知のPATHを実行しない。"""
+    """表示用のpinを優先し、更新後は署名検証した固定公式bundleだけを使う。"""
     if config:
-        return validate_executable(config, require_confirmation=False)
+        try:
+            return validate_executable(config, require_confirmation=False)
+        except (ValueError, OSError, RuntimeError):
+            if sys.platform != 'darwin':
+                raise
     if sys.platform == 'darwin':
-        bundled = pathlib.Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
-        if bundled.is_file():
-            return validate_location(bundled)
+        from queue_platform import DARWIN_TEAM, verify_darwin_cli_files
+        bundle = pathlib.Path('/Applications/ChatGPT.app')
+        bundled = bundle / 'Contents' / 'Resources' / 'codex-cli' / 'bin' / 'codex'
+        verify_darwin_cli_files(bundle, [bundled], DARWIN_TEAM)
+        return bundled
     raise ValueError('公式CLIを選択してください')
 
 
 def read_usage_status(config):
     """表示用の取得元だけを照合。既存共有接続への読取り以外は行わない。"""
-    executable = usage_executable(config)
     peer = None
     state = 'not_configured'
     if config:
         state = 'unavailable'
         try:
+            # 古いpinで共有接続へ触れず、表示用bundleの重い検証は最後に一度だけ。
+            validate_executable(config, require_confirmation=False)
             if config.get('mode') == 'queue':
                 from queue_bridge import QueueBridge
                 selected = QueueBridge(config=config, for_pending=True, timeout=3)
@@ -186,6 +193,109 @@ def usage_view_text(view):
     return '\n'.join(lines + [view['availability_text'], view['updated_text']])
 
 
+class ScrollViewport:
+    def __init__(self, root):
+        self.focus_target = None
+        self.fresh_focus = False
+        self.focus_anchor = None
+        self.focus_update = None
+        self.resize_pending = None
+        self.layout_size = None
+        self.canvas = tk.Canvas(root, background='#F3F6FA', highlightthickness=0,
+                                borderwidth=0)
+        self.scrollbar = ttk.Scrollbar(root, orient='vertical',
+                                       command=self.canvas.yview, takefocus=True)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.grid(row=0, column=0, sticky='nsew')
+        self.scrollbar.grid(row=0, column=1, sticky='ns')
+        self.body = ttk.Frame(self.canvas, style='Main.TFrame')
+        self.content = self.canvas.create_window(0, 0, window=self.body, anchor='nw')
+        self.canvas.bind('<Configure>', self.schedule_resize, add='+')
+        self.body.bind('<Configure>', self.schedule_resize, add='+')
+        root.bind('<Configure>', self.schedule_resize, add='+')
+        root.bind('<FocusIn>', self.focus_changed, add='+')
+
+    def schedule_resize(self, _event=None):
+        if self.resize_pending is None:
+            self.resize_pending = self.canvas.after_idle(self.resize)
+
+    def resize(self, _event=None):
+        self.resize_pending = None
+        width = max(1, self.canvas.winfo_width())
+        visible = self.canvas.winfo_height()
+        height = max(visible, self.body.winfo_reqheight())
+        actual = self.body.winfo_height()
+        self.discard_scrolled_focus()
+        if self.layout_size == (width, height, visible, actual):
+            return
+        self.layout_size = (width, height, visible, actual)
+        first, last = self.canvas.yview()
+        at_bottom = first > 0 and last >= 1
+        self.canvas.itemconfigure(self.content, width=width, height=height)
+        # Native Tk can temporarily allocate more than the requested window
+        # height. Keep that content reachable without fixing the window at
+        # its previous size; the next Configure can shrink the region again.
+        self.canvas.configure(scrollregion=(0, 0, width, max(height, actual)))
+        if at_bottom and not self.fresh_focus:
+            # Keep an explicit scroll to the end while wrapped labels settle.
+            # A queued check of the old focused control must not pull it back.
+            if self.focus_update is not None:
+                self.canvas.after_cancel(self.focus_update)
+                self.focus_update = None
+            self.canvas.yview_moveto(1)
+            return
+        # Wrapping can change the focused control's position after FocusIn.
+        # Restore visibility when dimensions settle, not on manual scrolling.
+        if self.focus_target is not None and self.focus_update is None:
+            self.focus_update = self.canvas.after(30, self.restore_focus_visibility)
+
+    def discard_scrolled_focus(self):
+        if (self.focus_target is not None and not self.fresh_focus
+                and self.focus_anchor is not None
+                and abs(self.canvas.canvasy(0) - self.focus_anchor) > 1):
+            # A later native Configure must not undo a user's scroll away
+            # from the previously focused control.
+            self.focus_target = None
+            self.focus_anchor = None
+            if self.focus_update is not None:
+                self.canvas.after_cancel(self.focus_update)
+                self.focus_update = None
+
+    def restore_focus_visibility(self):
+        self.focus_update = None
+        self.discard_scrolled_focus()
+        self.fresh_focus = False
+        if self.focus_target is not None:
+            self.ensure_visible(self.focus_target)
+
+    def focus_changed(self, event):
+        self.fresh_focus = True
+        self.focus_target = event.widget
+        self.ensure_visible(event.widget)
+        if self.focus_update is None:
+            self.focus_update = self.canvas.after(30, self.restore_focus_visibility)
+
+    def ensure_visible(self, widget):
+        ancestor = widget
+        while ancestor is not None and ancestor is not self.body:
+            ancestor = getattr(ancestor, 'master', None)
+        if ancestor is None:
+            return
+        if not widget.winfo_exists():
+            return
+        top = widget.winfo_rooty() - self.body.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        first = self.canvas.canvasy(0)
+        visible = self.canvas.winfo_height()
+        region = self.canvas.tk.splitlist(self.canvas.cget('scrollregion'))
+        height = float(region[3]) - float(region[1]) if len(region) == 4 else self.body.winfo_height()
+        if top < first:
+            self.canvas.yview_moveto(top / max(1, height))
+        elif bottom > first + visible:
+            self.canvas.yview_moveto((bottom - visible) / max(1, height))
+        self.focus_anchor = self.canvas.canvasy(0)
+
+
 class GUI:
     def __init__(self, enable_tray=True):
         if tk is None:
@@ -200,6 +310,7 @@ class GUI:
         self.rows = []
         self.tray = None
         self.tray_available = False
+        self.window_hidden = False
         self.closing = False
         self.monitor_queue = queue.Queue()
         self.monitor_running = False
@@ -207,6 +318,10 @@ class GUI:
         self.usage_running = False
         self.usage_thread = None
         self.usage_queue = queue.Queue(maxsize=1)
+        self.navigation_pending = False
+        self.navigation_thread = None
+        self.navigation_cancel = threading.Event()
+        self.navigation_results = queue.Queue(maxsize=1)
         self.queue_setup_running = False
         self.queue_setup_thread = None
         self.queue_setup_results = queue.Queue(maxsize=1)
@@ -227,6 +342,8 @@ class GUI:
         self.filter.trace_add('write', lambda *_: self.render_rows())
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
         self.configure_reopen()
+        self.root.bind('<Map>', self.sync_tray_window, add='+')
+        self.root.bind('<Unmap>', self.sync_tray_window, add='+')
         self.refresh()
         self.show_window()
         if enable_tray:
@@ -338,7 +455,7 @@ class GUI:
                                        '自動再開をOFF' if policy['enabled'] else '自動再開をON')
 
     def show_review_targets(self):
-        self.view_filter.set('要確認')
+        self.view_filter.set('確認が必要')
         self.search.set('')
         self.filter.set('すべて')
         self.render_rows()
@@ -541,6 +658,7 @@ class GUI:
     def configure_reopen(self):
         if sys.platform == 'darwin':
             self.root.createcommand('tk::mac::ReopenApplication', self.show_window)
+            self.root.createcommand('tk::mac::Quit', self.quit_app)
 
     def tray_location(self):
         return 'メニューバー' if sys.platform == 'darwin' else 'タスクトレイ'
@@ -739,9 +857,13 @@ class GUI:
 
     def build(self):
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=1, minsize=80)
+        self.root.rowconfigure(0, weight=1)
+        self.viewport = ScrollViewport(self.root)
+        body = self.viewport.body
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1, minsize=80)
         self.wrap_labels = []
-        top = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 8, 16, 4))
+        top = ttk.Frame(body, style='Main.TFrame', padding=(16, 8, 16, 2))
         top.grid(row=0, column=0, sticky='ew')
         top.columnconfigure(0, weight=1)
         ttk.Label(top, text='Codex Safe Resume', style='Heading.TLabel').grid(row=0, column=0, sticky='w')
@@ -750,19 +872,9 @@ class GUI:
         details_button = ttk.Menubutton(top, text='設定')
         details_button.grid(row=0, column=2, padx=(8, 0))
         details_menu = tk.Menu(details_button, tearoff=False)
-        details_menu.add_command(label='詳細表示（プロジェクト・並べ替え）', command=self.toggle_details)
-        details_menu.add_command(label='再開用の接続状態を確認…', command=self.reconnect_auto_watch)
-        details_menu.add_command(label='接続設定を確認・変更…', command=self.setup_connection)
+        details_menu.add_command(label='接続を確認・再設定（同意が必要）…', command=self.reconnect_auto_watch)
         details_menu.add_command(label='利用枠の詳細（送信しない）', command=self.show_usage_details)
         details_menu.add_command(label='一覧と利用枠を再取得（送信しない）', command=self.refresh_all)
-        details_menu.add_separator()
-        details_menu.add_command(label='チャット別の操作', state='disabled')
-        details_menu.add_command(label='実行・監視中を上に戻す', command=self.prioritize_active)
-        details_menu.add_command(label='選択したチャットだけON', command=lambda: self.toggle(True))
-        details_menu.add_command(label='完了として記録（監視を終了）', command=lambda: self.finish('completed'))
-        details_menu.add_command(label='要確認として記録（自動再開を停止）', command=lambda: self.finish('blocked'))
-        details_menu.add_command(label='確認して選び直す（試行履歴は保持）', command=self.review_reset)
-        details_menu.add_command(label='詳細情報（ID・場所）', command=self.show_technical_details)
         details_menu.add_separator()
         details_menu.add_command(label='アプリを終了', command=self.quit_app)
         details_button.configure(menu=details_menu)
@@ -796,6 +908,7 @@ class GUI:
                              textvariable=self.sort_choice, values=tuple(self.sort_options()))
         order.pack(side='left')
         order.bind('<<ComboboxSelected>>', self.apply_sort_choice)
+        ttk.Button(order_bar, text='実行・監視中を上に戻す', command=self.prioritize_active).pack(side='left', padx=8)
         ttk.Label(order_bar, text='列名のクリックでも変更できます', style='Sub.TLabel').pack(side='left', padx=8)
 
         bar = ttk.Frame(top, style='Main.TFrame', padding=(0, 4, 0, 4))
@@ -807,14 +920,21 @@ class GUI:
                      textvariable=self.filter).grid(row=0, column=2, padx=(0, 8))
         ttk.Button(bar, text='一覧・利用枠を更新', command=self.refresh_all).grid(row=0, column=3)
 
-        views = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 2))
+        views = ttk.Frame(body, style='Main.TFrame', padding=(16, 2))
         views.grid(row=1, column=0, sticky='ew')
-        self.view_filter = tk.StringVar(value='再開待ち')
-        for index, label in enumerate(('再開待ち', '要確認', 'すべて')):
+        self.view_filter = tk.StringVar(value='すべて')
+        for index, label in enumerate(('すべて', '解除待ち・再開中', '確認が必要')):
             ttk.Radiobutton(views, text=label, value=label, variable=self.view_filter,
                             command=self.render_rows).grid(row=0, column=index, padx=(0, 10))
 
-        table = ttk.Frame(self.root, style='Panel.TFrame', padding=1)
+        ttk.Button(views, text='詳細表示（プロジェクト・並べ替え）', command=self.toggle_details).grid(
+            row=0, column=3, sticky='e')
+        scope_note = ttk.Label(views, text='すべて：現在検出済みの通常チャットです。全履歴ではありません。',
+                               style='Sub.TLabel', wraplength=580)
+        scope_note.grid(row=1, column=0, columnspan=4, sticky='ew')
+        self.wrap_labels.append(scope_note)
+
+        table = ttk.Frame(body, style='Panel.TFrame', padding=1)
         table.grid(row=2, column=0, sticky='nsew', padx=16)
         table.columnconfigure(0, weight=1)
         table.rowconfigure(0, weight=1)
@@ -839,13 +959,14 @@ class GUI:
         vertical.grid(row=0, column=1, sticky='ns')
         horizontal.grid(row=1, column=0, sticky='ew')
         self.tree.bind('<<TreeviewSelect>>', self.select_row)
+        self.tree.bind('<Double-1>', self.open_selected_chat)
         if getattr(self, 'simple_mode', True):
             self.tree.configure(displaycolumns=('title', 'auto', 'status', 'reset'))
 
-        detail = ttk.Label(self.root, textvariable=self.details, style='Sub.TLabel', wraplength=580, justify='left')
+        detail = ttk.Label(body, textvariable=self.details, style='Sub.TLabel', wraplength=580, justify='left')
         detail.grid(row=3, column=0, sticky='ew', padx=16, pady=4)
         self.wrap_labels.append(detail)
-        target_panel = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 0, 16, 4))
+        target_panel = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 2))
         target_panel.grid(row=4, column=0, sticky='ew')
         target_panel.columnconfigure(0, weight=1)
         self.target_included = tk.BooleanVar(value=False)
@@ -856,16 +977,27 @@ class GUI:
         self.target_toggle.state(['disabled'])
         target_note = ttk.Label(target_panel, textvariable=self.target_reason,
                                 style='Sub.TLabel', wraplength=580)
-        target_note.grid(row=1, column=0, sticky='ew')
+        target_note.grid(row=1, column=0, columnspan=3, sticky='ew')
         self.wrap_labels.append(target_note)
-        footer = ttk.Frame(self.root, style='Main.TFrame', padding=(16, 0, 16, 4))
+        selected_actions = ttk.Menubutton(target_panel, text='選択チャットの操作')
+        selected_actions.grid(row=0, column=1, sticky='e', padx=(8, 0))
+        selected_menu = tk.Menu(selected_actions, tearoff=False)
+        selected_menu.add_command(label='選択したチャットを対象にする', command=lambda: self.toggle(True))
+        selected_menu.add_command(label='完了として記録（監視を終了）', command=lambda: self.finish('completed'))
+        selected_menu.add_command(label='要確認として記録（自動再開を停止）', command=lambda: self.finish('blocked'))
+        selected_menu.add_command(label='確認して選び直す（試行履歴は保持）', command=self.review_reset)
+        selected_menu.add_command(label='詳細情報（ID・場所）', command=self.show_technical_details)
+        selected_actions.configure(menu=selected_menu)
+        self.navigation_button = ttk.Button(target_panel, text='Codexで開く', command=self.open_selected_chat)
+        self.navigation_button.grid(row=0, column=2, padx=(8, 0), sticky='e')
+        footer = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 4))
         footer.grid(row=6, column=0, sticky='ew')
         footer.columnconfigure(0, weight=1)
         for row, variable in enumerate((self.status, self.tray_state)):
             label = ttk.Label(footer, textvariable=variable, style='Sub.TLabel', wraplength=580, justify='left')
             label.grid(row=row, column=0, sticky='ew')
             self.wrap_labels.append(label)
-        self.log = tk.Text(self.root, height=1, wrap='word', relief='flat', background='#EAF0F6',
+        self.log = tk.Text(body, height=1, wrap='word', relief='flat', background='#EAF0F6',
                            foreground='#344A61', font=('TkDefaultFont', 9))
         self.log.grid(row=7, column=0, sticky='ew', padx=16, pady=(0, 6))
         self.log.configure(state='disabled')
@@ -881,7 +1013,9 @@ class GUI:
     def resize_label_text(self, event):
         # Use allocated label geometry, not transient native-window Configure sizes.
         if event.widget in self.wrap_labels and event.width > 1:
-            event.widget.configure(wraplength=event.width)
+            width = max(1, event.width - 4)
+            if str(event.widget.cget('wraplength')) != str(width):
+                event.widget.configure(wraplength=width)
 
     @staticmethod
     def sort_options():
@@ -1064,7 +1198,7 @@ class GUI:
         live = {x['id']: x for x in self.known}
         simple = getattr(self, 'simple_mode', False)
         query = '' if simple else self.search.get().casefold().strip()
-        view = self.view_filter.get() if hasattr(self, 'view_filter') else ('再開待ち' if simple else 'すべて')
+        view = self.view_filter.get() if hasattr(self, 'view_filter') else 'すべて'
         mode = 'すべて' if simple else self.filter.get()
         config = connection_options(self.db) if config is None else config
         self.refresh_auto_status(config=config)
@@ -1074,9 +1208,9 @@ class GUI:
             if not self.is_visible_row(row, live):
                 continue
             t = live[row['id']]
-            if view == '再開待ち' and not (t.get('limited') or row['state'] in ('waiting', 'claimed', 'dispatched', 'monitoring')):
+            if view == '解除待ち・再開中' and row['state'] not in ('waiting', 'claimed', 'dispatched', 'monitoring'):
                 continue
-            if view == '要確認' and row['state'] != 'blocked':
+            if view == '確認が必要' and row['state'] != 'blocked':
                 continue
             title = row['title'] or '(タイトルなし)'
             project = pathlib.Path(row['cwd']).name if row['cwd'] else '—'
@@ -1110,7 +1244,7 @@ class GUI:
             return '実行中（読取候補）'
         if observed.get('limited'):
             return '利用枠停止の候補'
-        return '待機中'
+        return '再開処理なし'
 
     @staticmethod
     def reset_text(row, observed, configured):
@@ -1364,6 +1498,77 @@ class GUI:
         project = project[:23] + '…' if len(project) > 24 else project
         self.details.set(f'選択: {title}  |  {project}')
 
+    def open_selected_chat(self, event=None):
+        thread = getattr(self, 'navigation_thread', None)
+        if (self.closing or getattr(self, 'navigation_pending', False)
+                or thread is not None and thread.is_alive()):
+            return 'break' if event is not None else None
+        if event is not None:
+            if self.tree.identify_region(event.x, event.y) not in ('cell', 'tree'):
+                return 'break'
+            tid = self.tree.identify_row(event.y)
+            if not tid or not any(row['id'] == tid for row in self.rows):
+                return 'break'
+            self.tree.selection_set(tid)
+            self.select_row()
+        else:
+            tid = self.require_selected()
+            if not tid:
+                return
+        self.navigation_cancel = threading.Event()
+        self.navigation_results = queue.Queue(maxsize=1)
+        self.navigation_pending = True
+        self.navigation_button.configure(state='disabled')
+        cancelled, results = self.navigation_cancel, self.navigation_results
+
+        def worker():
+            outcome = 'failed'
+            try:
+                from thread_navigation import open_thread
+                def before_open():
+                    return not cancelled.is_set() and not self.closing
+                if before_open():
+                    open_thread(tid, before_open=before_open)
+                    outcome = 'requested' if before_open() else 'cancelled'
+                else:
+                    outcome = 'cancelled'
+            except Exception:
+                # Expected navigation errors and unexpected worker failures share a
+                # fixed user message; private paths and diagnostics stay out of Tk.
+                outcome = 'cancelled' if cancelled.is_set() else 'failed'
+            finally:
+                results.put_nowait(outcome)
+
+        self.navigation_thread = threading.Thread(target=worker, daemon=False, name='thread-navigation')
+        try:
+            self.navigation_thread.start()
+        except Exception:
+            self.navigation_results.put_nowait('failed')
+        self.root.after(100, self.drain_navigation)
+        return 'break' if event is not None else None
+
+    def drain_navigation(self):
+        if not getattr(self, 'navigation_pending', False):
+            return
+        if self.closing:
+            self.navigation_cancel.set()
+            return
+        if self.navigation_thread.is_alive():
+            self.root.after(100, self.drain_navigation)
+            return
+        try:
+            outcome = self.navigation_results.get_nowait()
+        except queue.Empty:
+            outcome = 'failed'
+        self.navigation_pending = False
+        self.navigation_button.configure(state='normal')
+        if outcome == 'requested':
+            self.write('Codexに元のチャットを開くよう要求しました。')
+        elif outcome == 'failed':
+            messagebox.showwarning('表示結果を確認できません',
+                                   '元のチャットを開く要求の結果を確認できません。Codex側で対象を確認してください。',
+                                   parent=self.root)
+
     def show_technical_details(self):
         tid = self.require_selected()
         if not tid:
@@ -1455,12 +1660,15 @@ class GUI:
             self.write('常駐アイコンを開始できません。画面を表示したまま使えます。')
             return
         pystray, Image, ImageDraw = deps
+        self.window_hidden = self.root.state() in ('withdrawn', 'iconic')
         def callback(func):
             # Native AppKit callbacks must not enter Tcl, even via after().
             # Windows callbacks can also arrive on the tray worker thread.
             return lambda icon, item: self.tray_actions.put(func)
         menu = pystray.Menu(
-            pystray.MenuItem('ウィンドウを開く', callback(self.show_window), default=True),
+            # Native text callbacks may run outside Tk's event loop.
+            pystray.MenuItem(lambda item: 'ウィンドウを開く' if self.window_hidden else 'トレイにしまう',
+                             callback(self.toggle_tray_window), default=True),
             pystray.MenuItem('一覧を更新', callback(self.refresh)),
             pystray.MenuItem('終了', callback(self.quit_app)),
         )
@@ -1559,10 +1767,32 @@ class GUI:
         self.show_window()
         self.write('常駐アイコンを利用できません。画面を表示したままにします。')
 
+    def sync_tray_window(self, event=None):
+        if self.closing or (event is not None and event.widget is not self.root):
+            return
+        hidden = self.root.state() in ('withdrawn', 'iconic')
+        if hidden == getattr(self, 'window_hidden', False):
+            return
+        self.window_hidden = hidden
+        if self.tray is not None:
+            try:
+                self.tray.update_menu()
+            except Exception:
+                self.write('常駐メニューの表示を更新できません。')
+
+    def toggle_tray_window(self):
+        if self.closing:
+            return
+        if self.root.state() in ('withdrawn', 'iconic'):
+            self.show_window()
+        else:
+            self.on_close()
+
     def show_window(self):
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        self.sync_tray_window()
 
     def on_close(self):
         if self.closing:
@@ -1575,6 +1805,7 @@ class GUI:
             visible = False
         if visible:
             self.root.withdraw()
+            self.sync_tray_window()
         elif self.tray_requested:
             self.tray_available = False
             self.show_window()
@@ -1585,26 +1816,36 @@ class GUI:
     def quit_app(self):
         if self.closing: return
         self.closing = True
+        cancelled = getattr(self, 'navigation_cancel', None)
+        if cancelled is not None:
+            cancelled.set()
         try:
             set_auto_watch(self.db, False)
         except Exception:
             self.hold_quit('停止設定を保存できません。アプリは終了していません。')
             return
+        self.root.title('Codex Safe Resume（終了処理中）')
+        for name in ('auto_status', 'status'):
+            variable = getattr(self, name, None)
+            if variable is not None:
+                variable.set('終了処理中：自動再開はOFFです。処理結果を確認しています。')
         self.shutdown_started = False
         self.finish_quit()
 
     def hold_quit(self, message):
         self.closing = False
+        self.root.title('Codex Safe Resume')
         self.show_window()
         self.write(message)
         if hasattr(self, 'auto_status'):
             self.auto_status.set('要確認：終了前の送信状態を確認してください')
         for method in ('monitor_tick', 'drain_monitor', 'usage_tick', 'drain_usage',
-                       'periodic', 'display_tick', 'poll_desktop_connection', 'drain_tray_actions'):
+                       'periodic', 'display_tick', 'poll_desktop_connection', 'drain_tray_actions',
+                       'drain_navigation'):
             self.root.after(1000, getattr(self, method))
 
     def finish_quit(self):
-        for name in ('monitor_thread', 'usage_thread', 'queue_setup_thread', 'shutdown_thread'):
+        for name in ('monitor_thread', 'usage_thread', 'queue_setup_thread', 'navigation_thread', 'shutdown_thread'):
             thread = getattr(self, name, None)
             if thread is not None and thread.is_alive():
                 self.root.after(100, self.finish_quit)
@@ -1645,6 +1886,8 @@ class GUI:
                 self.hold_quit('常駐アイコンを終了できません。アプリは終了していません。')
                 return
         self.db.close()
+        # Native tray teardown and Tk's own mainloop have separate stop flags.
+        self.root.quit()
         self.root.destroy()
 
     def run(self): self.root.mainloop()

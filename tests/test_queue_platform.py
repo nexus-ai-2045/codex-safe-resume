@@ -1,6 +1,7 @@
 import os
 import pathlib
 import plistlib
+import subprocess
 import types
 import tempfile
 import sys
@@ -38,6 +39,9 @@ class QueuePlatformTests(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
+        security = mock.patch('queue_attestation._security', return_value=b'fixture-acl')
+        security.start()
+        self.addCleanup(security.stop)
 
     def test_selects_requested_home_without_global_singleton(self):
         result = platform.desktop_for_home(self.home)
@@ -351,6 +355,102 @@ class QueuePlatformTests(unittest.TestCase):
             with self.assertRaises((ValueError, RuntimeError)):
                 platform._darwin_cli(desktop, server, [server, desktop], platform.DARWIN_TEAM)
 
+    def test_file_only_darwin_verifier_does_not_query_processes_or_stage_files(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run, \
+                mock.patch('desktop_binding.desktop_bundle') as binding, \
+                mock.patch.object(platform, '_identity') as identity, \
+                mock.patch('windows_runtime.stage_cli') as stage:
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('--deep', run.call_args_list[0].args[0])
+        binding.assert_not_called()
+        identity.assert_not_called()
+        stage.assert_not_called()
+
+    def test_darwin_signature_deadline_is_finite_thirty_seconds_without_weakening_checks(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        self.assertTrue(run.call_args_list)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs['timeout'], 30)
+            self.assertIn('--strict', call.args[0])
+            self.assertIn(platform.DARWIN_TEAM, call.args[0][4])
+        self.assertIn('--deep', run.call_args_list[0].args[0])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=subprocess.TimeoutExpired('codesign', 30)) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        run.assert_called_once()
+
+    def test_file_only_darwin_verifier_rejects_signature_seal_acl_and_escape(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=1)):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        with mock.patch.object(platform, 'validate_location', side_effect=ValueError('ACL')), \
+                mock.patch.object(platform.subprocess, 'run') as signature:
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+            signature.assert_not_called()
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)):
+            for target in (self.home/'codex', bundle/'Contents/../codex'):
+                with self.subTest(target=target):
+                    with self.assertRaises(ValueError):
+                        platform.verify_darwin_cli_files(bundle, [target], platform.DARWIN_TEAM)
+            envelope = bundle/'Contents/_CodeSignature/CodeResources'
+            envelope.write_bytes(plistlib.dumps({'files2': {cli.relative_to(bundle/'Contents').as_posix(): {'hash2': b'wrong'*6+b'xx'}}}))
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_cli_changed_during_codesign(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        def replace_after_signature(*args, **kwargs):
+            cli.write_bytes(b'updated during verification')
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=replace_after_signature):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_acl_changed_during_codesign(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        security = [b'initial-acl']
+        def change_acl(*args, **kwargs):
+            security[0] = b'changed-acl'
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch('queue_attestation._security', side_effect=lambda path: security[0]), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=change_acl):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_bad_publisher_and_bundle_identity(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with self.assertRaises(ValueError):
+            platform.verify_darwin_cli_files(bundle, [cli], 'OTHERTEAM')
+        plist = bundle/'Contents/Info.plist'
+        plist.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.example.other',
+                                         'CFBundleExecutable': 'Codex'}))
+        with self.assertRaises(ValueError):
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        for executable in ('../outside', '/absolute', '', None):
+            plist.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.openai.codex',
+                                             'CFBundleExecutable': executable or ''}))
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
     def test_restart_manager_inventory_releases_session_on_error(self):
         native = types.SimpleNamespace(**{name: mock.Mock(return_value=0) for name in ('RmStartSession', 'RmRegisterResources', 'RmGetList', 'RmEndSession')})
         native.RmRegisterResources.return_value = 5
@@ -395,6 +495,78 @@ class QueuePlatformTests(unittest.TestCase):
             stage.side_effect = ValueError('official bytes mismatch')
             with self.assertRaises(ValueError):
                 platform._windows_cli(desktop, server, [server, desktop])
+
+
+class DarwinBackendSelectionTests(unittest.TestCase):
+    def setUp(self):
+        root = pathlib.Path.cwd()
+        self.desktop = {'pid': 10, 'ppid': 1, 'start': [100, 0],
+                        'executable': str(root / 'Codex.app/Contents/MacOS/Codex')}
+        self.server = {'pid': 20, 'ppid': 10, 'start': [200, 0],
+                       'executable': str(root / 'Codex.app/Contents/Resources/codex')}
+        self.gui = {'pid': 30, 'ppid': 1, 'start': [110, 0],
+                    'executable': str(root / 'CodexSafeResume.app/Contents/MacOS/CodexSafeResume')}
+        self.helper = {'pid': 40, 'ppid': 30, 'start': [210, 0], 'executable': self.server['executable']}
+        self.identities = {row['pid']: row for row in (self.desktop, self.server, self.gui, self.helper)}
+        self.holders = [{'pid': 20, 'start': [200, 0]}, {'pid': 40, 'start': [210, 0]}]
+        self.bundles = {10: 'com.openai.codex', 30: 'com.codexsaferesume.app'}
+        import desktop_binding
+        patches = [mock.patch.object(platform, '_platform', return_value='darwin'),
+                   mock.patch.object(platform, '_identity', side_effect=lambda pid: dict(self.identities[pid])),
+                   mock.patch.object(platform, '_server_role', return_value='app-server'),
+                   mock.patch.object(desktop_binding, 'desktop_bundle', side_effect=lambda pid: self.bundles[pid])]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_installed_safe_resume_helper_is_not_a_second_desktop(self):
+        self.assertEqual(platform._backend_holder(self.holders), self.server)
+
+    def test_python_parent_and_proven_other_application_are_excluded(self):
+        self.identities[30] = dict(self.gui, executable=str(pathlib.Path.cwd() / 'python3'))
+        self.assertEqual(platform._backend_holder(self.holders), self.server)
+        self.identities[30] = dict(self.gui)
+        self.bundles[30] = 'com.apple.Terminal'
+        self.assertEqual(platform._backend_holder(self.holders), self.server)
+
+    def test_two_official_backend_holders_are_still_rejected(self):
+        self.bundles[30] = 'com.openai.codex'
+        with self.assertRaises(ValueError):
+            platform._backend_holder(self.holders)
+
+    def test_missing_unreadable_or_malformed_bundle_identity_is_not_skipped(self):
+        import desktop_binding
+        for value in (None, '', 'None', 123, True, b'com.codexsaferesume.app', 'not-a-bundle',
+                      'com.example bad', 'com.example\0app', 'a.' + 'b' * 256):
+            with self.subTest(value=value):
+                self.bundles[30] = value
+                with self.assertRaises(ValueError):
+                    platform._backend_holder(self.holders)
+        with mock.patch.object(desktop_binding, 'desktop_bundle', side_effect=ValueError('unavailable')):
+            with self.assertRaises(ValueError):
+                platform._backend_holder(self.holders)
+
+    def test_parent_pid_reuse_or_path_change_during_bundle_lookup_is_rejected(self):
+        import desktop_binding
+        for change in ({'start': [111, 0]}, {'executable': self.desktop['executable']}):
+            def bundle(pid):
+                if pid == 30:
+                    self.identities[30] = dict(self.gui, **change)
+                return self.bundles[pid]
+            self.identities[30] = dict(self.gui)
+            with mock.patch.object(desktop_binding, 'desktop_bundle', side_effect=bundle):
+                with self.assertRaises(ValueError):
+                    platform._backend_holder(self.holders)
+
+    def test_unreadable_helper_or_parent_remains_a_denial(self):
+        for missing in (30, 40):
+            def identity(pid):
+                if pid == missing:
+                    raise ValueError('unavailable')
+                return dict(self.identities[pid])
+            with mock.patch.object(platform, '_identity', side_effect=identity):
+                with self.assertRaises(ValueError):
+                    platform._backend_holder(self.holders)
 
 
 class QueueAttestationTests(unittest.TestCase):

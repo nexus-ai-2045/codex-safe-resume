@@ -14,7 +14,7 @@ class Startup(unittest.TestCase):
         gui = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'GUI')
         init = next(n for n in gui.body if isinstance(n, ast.FunctionDef) and n.name == '__init__')
         scope = {'tk': SimpleNamespace(Tk=Mock(return_value=Mock()), StringVar=Mock),
-                 'connection': Mock, 'queue': __import__('queue'),
+                 'connection': Mock, 'queue': __import__('queue'), 'threading': __import__('threading'),
                  'usage_unknown_text': usage_unknown_text}
         exec(compile(ast.Module(body=[init], type_ignores=[]), 'app.py', 'exec'), scope)
         instance = Mock()

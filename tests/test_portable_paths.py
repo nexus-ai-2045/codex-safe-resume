@@ -1,5 +1,8 @@
 """実ユーザー領域を使わずportable配置の所有権・リンク拒否を検証する。"""
 from pathlib import Path
+import hashlib
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,6 +47,50 @@ class MacPortable(unittest.TestCase):
         state=self.root/'state'; state.mkdir();(state/'resume.sqlite3').write_text('db')
         self.assertEqual(self.call('csr_remove_settings "$2"',state).returncode,0)
         self.assertFalse(state.exists())
+    def test_manifest_uses_one_hash_worker_for_many_entries(self):
+        app=self.root/'app';app.mkdir()
+        for index in range(64):
+            (app/f'payload {index:03}').write_bytes(bytes([index])*64)
+        for index in range(6):
+            (app/f'link {index}').symlink_to(f'payload {index:03}')
+        result=self.call('set -x; csr_manifest "$2"',app)
+        self.assertEqual(result.returncode,0,result.stderr)
+        workers=re.findall(r'^\++ (?:/usr/bin/(?:shasum|perl)|readlink) ',result.stderr,re.MULTILINE)
+        self.assertLessEqual(len(workers),1,'ハッシュ・リンク検査は単一のworkerで処理する')
+        self.assertEqual(len(result.stdout.splitlines()),70)
+
+    def test_owner_v1_manifest_matches_golden_bytes(self):
+        app=self.root/'Golden App.app';app.mkdir()
+        directory=app/'資料 folder';directory.mkdir()
+        payload=b'payload\x00with binary\xff\n'
+        (directory/'data space').write_bytes(payload)
+        (app/'empty').write_bytes(b'')
+        target='資料 folder/data space'
+        (app/'relative link').symlink_to(target)
+        (app/'directory link').symlink_to('資料 folder',target_is_directory=True)
+        marker=app/'.custom-owner'
+        expected=[
+            'D\t-\t資料 folder',
+            'F\t'+hashlib.sha256(payload).hexdigest()+'\t資料 folder/data space',
+            'F\t'+hashlib.sha256(b'').hexdigest()+'\tempty',
+            'L\t'+hashlib.sha256((target+'\n').encode()).hexdigest()+'\trelative link',
+            'L\t'+hashlib.sha256('資料 folder\n'.encode()).hexdigest()+'\tdirectory link',
+        ]
+        golden=b'codex-safe-resume-portable-v1\n'+b''.join(
+            line.encode()+b'\n' for line in sorted(expected,key=lambda line:line.encode()))
+        result=self.call('csr_write_owner "$2" "$3"; csr_verify_owner "$2" "$3"',app,marker)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(marker.read_bytes(),golden)
+
+    def test_manifest_refuses_control_paths_and_unknown_file_types(self):
+        for character in ('\n','\r','\t'):
+            with self.subTest(character=repr(character)):
+                app=self.root/('app'+str(ord(character)));app.mkdir()
+                (app/('bad'+character+'name')).write_bytes(b'keep')
+                self.assertNotEqual(self.call('csr_manifest "$2"',app).returncode,0)
+        app=self.root/'fifo-app';app.mkdir();os.mkfifo(app/'pipe')
+        self.assertNotEqual(self.call('csr_manifest "$2"',app).returncode,0)
+
     def test_external_bundle_symlink_refused(self):
         app=self.root/'app';app.mkdir();outside=self.root/'outside';outside.write_text('keep')
         (app/'link').symlink_to(outside)
