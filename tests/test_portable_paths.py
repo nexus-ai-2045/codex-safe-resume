@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,31 +96,70 @@ class MacPortable(unittest.TestCase):
             self.assertTrue(state.with_name(state.name + '.gui.lock').exists())
         self.assertEqual(self.call('csr_remove_settings "$2"', state).returncode, 0)
 
+    def paused_settings_removal(self, state):
+        # rm runs inside a find-fed loop: its stdin is not the launcher pipe.
+        # Only the copied fixture helper uses this bounded filesystem gate.
+        ready, release = self.root/'deletion-ready', self.root/'deletion-release'
+        gate = self.root/'deletion-gate.py'
+        gate.write_text('''from pathlib import Path
+import sys
+import time
+ready, release = map(Path, sys.argv[1:3])
+temporary = ready.with_suffix('.pending')
+temporary.write_text(sys.argv[3])
+temporary.replace(ready)
+deadline = time.monotonic() + 10
+while not release.is_file():
+    if time.monotonic() >= deadline:
+        raise SystemExit('isolated deletion gate release timed out')
+    time.sleep(0.01)
+''')
+        helper = self.root/'helper.sh'
+        helper.write_text((ROOT/'packaging/macos-common.sh').read_text() + '''
+rm() {
+  "$CSR_TEST_PYTHON" "$CSR_TEST_GATE" "$CSR_TEST_READY" "$CSR_TEST_RELEASE" "$PPID" || return $?
+  command /bin/rm "$@"
+}
+''')
+        environment = dict(os.environ, CSR_TEST_PYTHON=sys.executable, CSR_TEST_GATE=str(gate),
+                           CSR_TEST_READY=str(ready), CSR_TEST_RELEASE=str(release))
+        process = subprocess.Popen(['/bin/bash','-c','source "$1"; csr_remove_settings "$2"',
+                                    'test',str(helper),str(state)], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
+                                   env=environment, start_new_session=True)
+        def cleanup():
+            release.touch()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                # This session contains only our own isolated fixture descendants.
+                try: os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError: pass
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try: os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    process.communicate(timeout=5)
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 10
+        while not ready.is_file():
+            if process.poll() is not None:
+                _, error = process.communicate(timeout=5)
+                self.fail('削除境界の到達前に試験プロセスが終了: '+error)
+            if time.monotonic() >= deadline:
+                self.fail('隔離した削除境界への到達が期限切れ')
+            time.sleep(0.01)
+        self.assertIsNone(process.poll())
+        self.assertFalse(release.exists())
+        return process, release, int(ready.read_text())
+
     def test_removal_holds_same_sibling_lease_through_delete(self):
         from core import gui_lease
         state = self.root/'state with spaces'
         state.mkdir(mode=0o700)
         (state/'resume.sqlite3').write_bytes(b'isolated settings')
-        # A copied helper pauses its real rm boundary without a production test hook.
-        helper = self.root/'helper.sh'
-        helper.write_text((ROOT/'packaging/macos-common.sh').read_text() + '''
-rm() {
-  printf 'deletion-boundary\\n'
-  IFS= read -r release
-  command /bin/rm "$@"
-}
-''')
-        process = subprocess.Popen(['/bin/bash', '-c', 'source "$1"; csr_remove_settings "$2"',
-                                    'test', str(helper), str(state)], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        def cleanup():
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=5)
-        self.addCleanup(cleanup)
-        lines = queue.Queue()
-        threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
-        self.assertEqual(lines.get(timeout=10), 'deletion-boundary\n')
+        process, release, _ = self.paused_settings_removal(state)
         try:
             lock = state.with_name(state.name + '.gui.lock')
             with gui_lease(state) as acquired:
@@ -128,7 +168,8 @@ rm() {
             inode = lock.stat().st_ino
             self.assertEqual((state/'resume.sqlite3').read_bytes(), b'isolated settings')
         finally:
-            _, error = process.communicate('\n', timeout=10)
+            release.touch()
+            _, error = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 0, error)
         self.assertFalse(state.exists())
         self.assertEqual(lock.stat().st_ino, inode)
@@ -179,33 +220,25 @@ rm() {
         state = self.root/'state'
         state.mkdir(mode=0o700)
         (state/'resume.sqlite3').write_bytes(b'isolated')
-        helper = self.root/'helper.sh'
-        helper.write_text((ROOT/'packaging/macos-common.sh').read_text() + '''
-rm() {
-  printf '%s\\n' "$PPID"
-  IFS= read -r release
-  command /bin/rm "$@"
-}
-''')
-        process = subprocess.Popen(['/bin/bash','-c','source "$1"; csr_remove_settings "$2"',
-                                    'test',str(helper),str(state)], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        process, release, supervisor = self.paused_settings_removal(state)
         try:
-            lines = queue.Queue()
-            threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
-            supervisor = int(lines.get(timeout=10).strip())
             # This PID is emitted by our own isolated deletion child, never a live app.
             os.kill(supervisor, signal.SIGTERM)
+            # wait reaps only the outer wrapper; the child still holds its pipes.
+            code = process.wait(timeout=5)
+            self.assertIn(code, (-signal.SIGTERM, 128 + signal.SIGTERM))
+            self.assertFalse(release.exists())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(supervisor, 0)
             with gui_lease(state) as acquired:
                 self.assertFalse(acquired)
-            process.communicate('\n', timeout=10)
+            release.touch()
+            process.communicate(timeout=10)
             self.assertFalse(state.exists())
             with gui_lease(state) as acquired:
                 self.assertTrue(acquired)
         finally:
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=5)
+            release.touch()
     def test_manifest_uses_one_hash_worker_for_many_entries(self):
         app=self.root/'app';app.mkdir()
         for index in range(64):
