@@ -7,8 +7,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app
 import core
@@ -146,6 +147,27 @@ class GuiSingleInstance(unittest.TestCase):
             with self.assertRaises(OSError) as caught:
                 app.main()
             self.assertIs(caught.exception, error)
+
+    def test_windows_gui_open_uses_native_error_and_only_sharing_is_busy(self):
+        import windows_platform
+        for number in (32, 33, 5, 12345, None):
+            error = OSError('isolated Windows GUI open error')
+            error.winerror = number
+            fake_os = SimpleNamespace(name='nt', O_CREAT=os.O_CREAT, O_RDWR=os.O_RDWR,
+                                      open=Mock(side_effect=AssertionError('CRT open loses native error')))
+            with self.subTest(number=number), patch.object(core, 'os', fake_os), \
+                    patch.object(core, 'reject_links'), \
+                    patch.object(windows_platform, 'open_gui_lock', side_effect=error, create=True) as opened:
+                if number in (32, 33):
+                    with core._file_lease(self.home/'fixture.lock', gui=True) as acquired:
+                        self.assertFalse(acquired)
+                else:
+                    with self.assertRaises(OSError) as caught:
+                        with core._file_lease(self.home/'fixture.lock', gui=True):
+                            self.fail('invalid native error must raise')
+                    self.assertIs(caught.exception, error)
+                opened.assert_called_once_with(self.home/'fixture.lock')
+                fake_os.open.assert_not_called()
 
     def test_removed_state_is_not_recreated_by_busy_launcher(self):
         with core.gui_lease(self.home) as acquired:

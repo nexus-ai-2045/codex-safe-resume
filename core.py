@@ -99,7 +99,11 @@ def _file_lease(lock_path, *, gui=False):
     reject_links(lock_path)
     flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
     try:
-        fd = os.open(lock_path, flags, 0o600)
+        if gui and os.name == 'nt':
+            from windows_platform import open_gui_lock
+            fd = open_gui_lock(lock_path)
+        else:
+            fd = os.open(lock_path, flags, 0o600)
     except OSError as error:
         # Windowsの削除側はFileShare.Noneで同じ制御ファイルを保持する。
         # 取得段階だけをbusyとし、呼出元の例外を捕捉しない。
