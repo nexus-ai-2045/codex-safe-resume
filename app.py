@@ -16,7 +16,7 @@ try:
     from quota_widgets import QuotaCards
 except ImportError:
     tk = ttk = messagebox = filedialog = tkfont = QuotaCards = None
-from core import connection, discover, sync, list_threads, enable, quota, mark, dry_run, check_id
+from core import connection, discover, sync, list_threads, enable, quota, mark, dry_run, check_id, gui_lease
 from watch import once as monitor_once
 from diagnostics import monitor_status, JapaneseParser
 from connection_settings import (configure as configure_connection, load as connection_options,
@@ -1913,7 +1913,13 @@ def main():
     if args.cmd == 'diagnose':
         from diagnose import main as diagnose_main
         return diagnose_main(['--json'] if args.json else [])
-    if args.cmd == 'gui': return GUI(enable_tray=not args.no_tray).run()
+    if args.cmd == 'gui':
+        with gui_lease() as acquired:
+            if not acquired:
+                if sys.stderr is not None:
+                    print('同じ保存先のCodex Safe Resumeは起動済み、または設定削除中です。起動済みの場合は常駐アイコンから表示できます。', file=sys.stderr)
+                return 0
+            return GUI(enable_tray=not args.no_tray).run()
     if args.cmd == 'mark':
         if args.state == 'idle':
             if not args.dry_run and (args.expected_generation is None or args.expected_generation < 0):

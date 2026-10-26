@@ -65,12 +65,67 @@ csr_verify_owner() {
   [ "$stored" = "$(printf 'codex-safe-resume-portable-v1\n%s' "$actual")" ] || { csr_error '配置後の変更を検出しました。削除を停止しました。'; return 1; }
 }
 csr_remove_settings() {
-  local root="$1" entry name
+  local root="$1" helper="${BASH_SOURCE[0]}"
+  case "$helper" in /*) ;; *) helper="$PWD/$helper" ;; esac
+  csr_safe_path "$root" || return 1
+  csr_safe_path "$helper" || return 1
+  # Pythonのgui_leaseと同じsibling inodeを削除完了まで親プロセスで保持する。
+  /usr/bin/perl -MFcntl=:DEFAULT,:flock,:mode -MCwd=abs_path -MFile::Basename=dirname,basename -e '
+    use strict;
+    use warnings;
+    sub refuse { print STDERR "起動ロックを確認できないため設定を保持しました。\n"; exit 1; }
+    my ($root, $helper) = @ARGV;
+    my $parent = abs_path(dirname($root));
+    refuse() unless defined($parent);
+    my $name = basename($root);
+    refuse() if $name eq "." || $name eq ".." || $name eq "/";
+    $root = "$parent/$name";
+    my @parent = lstat($parent);
+    refuse() unless @parent && S_ISDIR($parent[2]) && $parent[4] == $< && !($parent[2] & 0022);
+    my $lock = "$root.gui.lock";
+    sysopen(my $lease, $lock, O_CREAT | O_RDWR | O_NOFOLLOW, 0600) or refuse();
+    my @info = stat($lease);
+    refuse() unless @info && S_ISREG($info[2]) && $info[3] == 1 && $info[4] == $<
+      && !($info[2] & 0077) && $info[7] <= 1;
+    unless (flock($lease, LOCK_EX | LOCK_NB)) {
+      print STDERR "使用中または確認できない設定データを保持して停止しました。\n";
+      exit 1;
+    }
+    my @path = lstat($lock);
+    my @current = lstat($parent);
+    refuse() unless @path && $path[0] == $info[0] && $path[1] == $info[1]
+      && @current && $current[0] == $parent[0] && $current[1] == $parent[1];
+    # 子の削除shellも同じopen-file descriptionを保持する。親の異常終了で排他を失わない。
+    $^F = fileno($lease);
+    fcntl($lease, F_SETFD, 0) or refuse();
+    my $result = system "/bin/bash", "-c", q{source "$1"; _csr_remove_settings_locked "$2" "$3"},
+      "csr-settings-removal", $helper, $root, fileno($lease);
+    close($lease) or refuse();
+    exit($result == 0 ? 0 : 1);
+  ' -- "$root" "$helper"
+}
+# 内部専用。公開入口csr_remove_settingsがsibling lockを保持して呼び出す。
+_csr_remove_settings_locked() {
+  local root="$1" fd="${2:-}" entry name
+  case "$fd" in ''|*[!0-9]*) csr_error '設定削除の起動ロックがありません。'; return 1;; esac
+  # 直接呼出しでは削除しない。継承した同一inodeのfdで排他を再確認する。
+  /usr/bin/perl -MFcntl=:flock,:mode -e '
+    my ($path, $fd) = @ARGV;
+    open(my $held, "+<&=", $fd) or exit 1;
+    my @info = stat($held);
+    my @path = lstat($path);
+    exit 1 unless @info && @path && S_ISREG($info[2]) && $info[3] == 1
+      && $info[4] == $< && !($info[2] & 0077) && $info[7] <= 1
+      && $info[0] == $path[0] && $info[1] == $path[1];
+    flock($held, LOCK_EX | LOCK_NB) or exit 1;
+  ' -- "$root.gui.lock" "$fd" || { csr_error '設定削除の起動ロックを確認できません。'; return 1; }
   csr_safe_path "$root" || return 1
   [ -d "$root" ] || return 0
-  if /usr/sbin/lsof -t -- "$root/monitor.lock" "$root/resume.sqlite3" >/dev/null 2>&1; then
-    csr_error '使用中の設定データを保持して停止しました。'; return 1
-  fi
+  for name in monitor.lock resume.sqlite3; do
+    if [ -e "$root/$name" ] && /usr/sbin/lsof -t -- "$root/$name" >/dev/null 2>&1; then
+      csr_error '使用中の設定データを保持して停止しました。'; return 1
+    fi
+  done
   while IFS= read -r -d '' entry; do
     name="${entry##*/}"
     case "$name" in resume.sqlite3|resume.sqlite3-wal|resume.sqlite3-shm|monitor.lock) ;; *) csr_error '未知の設定ファイルを保持しました。'; return 1;; esac

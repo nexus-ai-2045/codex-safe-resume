@@ -1,5 +1,6 @@
 """画面を開かず、実際の初期化処理が監視タイマーを登録することを確認。"""
 import ast
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -45,7 +46,8 @@ class DefaultLaunch(unittest.TestCase):
         main=next(n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='main')
         from diagnostics import JapaneseParser
         gui=Mock()
-        scope={'sys':SimpleNamespace(argv=['CodexSafeResume']), 'JapaneseParser':JapaneseParser,'GUI':gui}
+        scope={'sys':SimpleNamespace(argv=['CodexSafeResume']), 'JapaneseParser':JapaneseParser,'GUI':gui,
+               'gui_lease': lambda: contextlib.nullcontext(True)}
         exec(compile(ast.Module(body=[main],type_ignores=[]),'app.py','exec'),scope)
         scope['main']()
         gui.assert_called_once_with(enable_tray=True)
