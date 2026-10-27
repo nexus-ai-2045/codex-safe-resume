@@ -26,7 +26,7 @@ class SimpleUI(unittest.TestCase):
         buttons = {options.get('text'): options for kind, _, _, options in records if kind == 'Button'}
         buttons['自動再開をON']['command']()
         gui.toggle_auto_watch.assert_called_once()
-        self.assertEqual(len(gui.advanced_widgets), 4)
+        self.assertEqual(len(gui.advanced_widgets), 5)
         for widget in gui.advanced_widgets:
             widget.grid_remove.assert_called_once()
         self.assertIn(('title', 'auto', 'status', 'reset'),

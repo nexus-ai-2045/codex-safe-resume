@@ -278,6 +278,22 @@ class GuiControls(unittest.TestCase):
         self.assertEqual(len(weighted_rows), 1)
 
 
+    def test_simple_view_keeps_manual_state_changes_in_details(self):
+        gui = self.gui()
+        gui.simple_mode = True
+        records = self.build(gui)
+        actions = next(widget for kind, widget, _, options in records
+                       if kind == 'Menubutton' and options.get('text') == '選択チャットの操作')
+        actions.grid_remove.assert_called_once()
+        gui.navigation_button.grid_remove.assert_not_called()
+        gui.render_rows = Mock()
+        gui.toggle_details()
+        self.assertFalse(gui.simple_mode)
+        self.assertEqual(actions.grid.call_count, 2)
+        gui.toggle_details()
+        self.assertTrue(gui.simple_mode)
+        self.assertEqual(actions.grid_remove.call_count, 2)
+
     def test_views_start_with_all_and_explain_detected_scope(self):
         gui = self.gui()
         records = self.build(gui)

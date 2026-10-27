@@ -1,3 +1,10 @@
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
 import tkinter as tk
 import time
 import unittest
@@ -190,3 +197,76 @@ class SmallWindowLayout(unittest.TestCase):
 
 class ScaledSmallWindowLayout(SmallWindowLayout):
     tk_scaling = 1.5
+
+
+_LAYOUT_CHILD = """
+import importlib
+import json
+import sys
+import unittest
+
+sys.path.insert(0, sys.argv[3])
+module = importlib.import_module(sys.argv[1])
+suite = unittest.defaultTestLoader.loadTestsFromName(sys.argv[2], module)
+if suite.countTestCases() != 1:
+    raise RuntimeError("Expected exactly one layout test")
+result = unittest.TestResult()
+suite.run(result)
+status = "failed" if result.errors or result.failures else "passed"
+reason = ""
+if result.skipped and status == "passed":
+    status, reason = "skipped", result.skipped[0][1]
+print(json.dumps({"status": status, "reason": reason}), flush=True)
+"""
+
+
+class _IsolatedLayoutCase(unittest.TestCase):
+    def __init__(self, test_id="runTest", test_name=None):
+        super().__init__()
+        self.test_id = test_id
+        self.test_name = test_name
+
+    def id(self):
+        return self.test_id
+
+    def __str__(self):
+        return self.test_id
+
+    def runTest(self):
+        with tempfile.TemporaryDirectory(prefix="csr-layout-") as directory:
+            env = os.environ.copy()
+            env["CODEX_HOME"] = str(Path(directory) / "empty-codex")
+            env["CODEX_RESUME_HOME"] = str(Path(directory) / "state")
+            try:
+                completed = subprocess.run(
+                    [sys.executable, "-c", _LAYOUT_CHILD, __name__, self.test_name,
+                     str(Path(__file__).resolve().parent)],
+                    cwd=Path(__file__).resolve().parent.parent,
+                    env=env, capture_output=True, text=True, timeout=90)
+            except subprocess.TimeoutExpired:
+                raise self.failureException("レイアウト試験の子プロセスが90秒以内に終了しませんでした") from None
+            except OSError:
+                raise self.failureException("レイアウト試験の子プロセスを起動できませんでした") from None
+        self.assertEqual(completed.returncode, 0,
+                         "レイアウト試験の子プロセスが異常終了しました")
+        try:
+            outcome = json.loads(completed.stdout.splitlines()[-1])
+            status = outcome["status"]
+            reason = outcome["reason"]
+            if status not in ("passed", "failed", "skipped") or not isinstance(reason, str):
+                raise ValueError
+        except (ValueError, TypeError, KeyError, IndexError):
+            raise self.failureException("レイアウト試験の子プロセスから有効な結果を取得できませんでした") from None
+        if status == "skipped":
+            reason = reason.replace(str(Path.home()), "<home>")
+            reason = re.sub(r"(?:[A-Za-z]:[\\/]|/)[^\s'\"]+", "<path>", reason)
+            self.skipTest(reason)
+        self.assertEqual(status, "passed", "子プロセス内のレイアウト検証が失敗しました")
+
+
+def load_tests(loader, standard_tests, pattern):
+    # Method-name loading in the child bypasses this discovery-only wrapper.
+    return unittest.TestSuite(
+        _IsolatedLayoutCase(case.id(), f"{type(case).__name__}.{case._testMethodName}")
+        for layout in (SmallWindowLayout, ScaledSmallWindowLayout)
+        for case in loader.loadTestsFromTestCase(layout))
