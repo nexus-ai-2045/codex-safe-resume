@@ -8,7 +8,8 @@ mkdir -p build
 BUILD_LOG="$PWD/build/build-macos.log"
 "$PYTHON" -c 'import tkinter; tkinter.Tcl()' > "$BUILD_LOG" 2>&1 || { echo '画面ライブラリを読み込めません。ビルド用PythonとTkを確認してください。' >&2; exit 1; }
 "$PYTHON" -m pip install --require-hashes -r packaging/requirements-build.lock >> "$BUILD_LOG" 2>&1 || { echo 'ビルド依存を導入できません。' >&2; exit 1; }
-"$PYTHON" -m PyInstaller --noconfirm --clean --windowed --osx-bundle-identifier com.codexsaferesume.app --name 'Codex Safe Resume' --distpath dist --workpath build --specpath build app.py >> "$BUILD_LOG" 2>&1 || { echo 'アプリをビルドできません。' >&2; exit 1; }
+"$PYTHON" packaging/build-icons.py --output build/icons >> "$BUILD_LOG" 2>&1 || { echo '配布アイコンを生成できません。'; exit 1; }
+"$PYTHON" -m PyInstaller --noconfirm --clean --windowed --icon "$PWD/build/icons/SafeResume.icns" --osx-bundle-identifier com.codexsaferesume.app --name 'Codex Safe Resume' --distpath dist --workpath build --specpath build app.py >> "$BUILD_LOG" 2>&1 || { echo 'アプリをビルドできません。' >&2; exit 1; }
 APP="$PWD/dist/Codex Safe Resume.app"
 [ -d "$APP" ] || { echo 'アプリが生成されませんでした' >&2; exit 1; }
 # 配布物内のTcl/Tkを検査。既存ユーザー領域は診断に使わない。

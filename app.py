@@ -10,6 +10,7 @@ import queue
 import time
 import re
 from contextlib import closing
+from app_icons import create_tray_image
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog, font as tkfont
@@ -74,13 +75,6 @@ def tray_dependencies():
         return None
 
 
-def create_tray_image(Image, ImageDraw):
-    image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
-    painter = ImageDraw.Draw(image)
-    painter.rounded_rectangle((5, 5, 59, 59), radius=15, fill='#245A91')
-    painter.arc((17, 16, 48, 48), 40, 310, fill='white', width=6)
-    painter.polygon([(48, 46), (47, 30), (35, 39)], fill='white')
-    return image
 
 
 def usage_executable(config):
