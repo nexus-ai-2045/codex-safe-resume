@@ -10,7 +10,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Python / Tkinterが必要です' }
 if ($LASTEXITCODE -ne 0) { throw 'ビルド依存の導入に失敗しました' }
 & $PythonExecutable packaging/build-icons.py --output build/icons *>> $BuildLog
 if ($LASTEXITCODE -ne 0) { throw '配布アイコンを生成できません' }
-& $PythonExecutable -m PyInstaller --noconfirm --clean --windowed --icon build/icons/SafeResume.ico --onedir --name CodexSafeResume --distpath dist --workpath build --specpath build app.py *>> $BuildLog
+$ApplicationIcon = Join-Path $PWD 'build/icons/SafeResume.ico'
+& $PythonExecutable -m PyInstaller --noconfirm --clean --windowed --icon $ApplicationIcon --onedir --name CodexSafeResume --distpath dist --workpath build --specpath build app.py *>> $BuildLog
 if ($LASTEXITCODE -ne 0) { throw 'アプリのビルドに失敗しました' }
 $exe = 'dist/CodexSafeResume/CodexSafeResume.exe'
 if (-not (Test-Path $exe)) { throw 'アプリ本体が生成されませんでした' }

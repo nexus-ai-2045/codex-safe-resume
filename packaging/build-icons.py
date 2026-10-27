@@ -9,6 +9,10 @@ from app_icons import generate_icons
 
 
 def main():
+    # CIの出力先がWindows既定の文字コードでも、日本語をUTF-8で記録する。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='生成先フォルダー')
     args = parser.parse_args()
