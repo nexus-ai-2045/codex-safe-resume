@@ -124,12 +124,12 @@ class ThreadNavigation(unittest.TestCase):
                                  '--open-chat', THREAD, 'nan'], env=environment,
                                 capture_output=True, timeout=3, check=False)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, b'failed\n')
+        self.assertEqual(result.stdout.splitlines(), [b'failed'])
         self.assertEqual(result.stderr, b'')
         self.assertFalse(home.exists())
 
     def test_no_tcc_or_deep_verification_imports(self):
-        source = Path(nav.__file__).read_text()
+        source = Path(nav.__file__).read_text(encoding='utf-8')
         for forbidden in ('AppKit', 'Foundation', 'codesign', 'validate_location', 'AECreateDesc'):
             self.assertNotIn(forbidden, source)
 
@@ -192,7 +192,7 @@ class Supervisor(unittest.TestCase):
                 patch.object(nav.sys, 'executable', '/bundle/CodexSafeResume'), \
                 patch.object(Path, 'is_file', return_value=True):
             self.assertEqual(nav._helper_command(THREAD, deadline), [
-                '/bundle/CodexSafeResumeBridge', '--open-chat', THREAD, str(deadline)])
+                str(Path('/bundle/CodexSafeResumeBridge')), '--open-chat', THREAD, str(deadline)])
         with patch.object(nav.sys, 'frozen', False, create=True):
             command = nav._helper_command(THREAD, deadline)
             self.assertEqual(command[:2], [sys.executable, '-B'])
