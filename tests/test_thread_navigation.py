@@ -1,15 +1,16 @@
-"""チャットを開く要求は送信・状態DB・任意コマンド実行から分離する。"""
-import plistlib
-import ctypes
+"""Mac navigation stays in a bounded, owned console child."""
+import os
 from pathlib import Path
-from types import SimpleNamespace
+import plistlib
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-import thread_navigation as navigation
-
+import desktop_launcher
+import thread_navigation as nav
 
 THREAD = '11111111-1111-4111-8111-111111111111'
 
@@ -18,156 +19,191 @@ class ThreadNavigation(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.bundle = Path(directory.name).resolve() / 'Codex.app'
-        executable = self.bundle / 'Contents/MacOS/Codex'
-        executable.parent.mkdir(parents=True)
-        executable.write_bytes(b'not executed')
-        info = {'CFBundleIdentifier': 'com.openai.codex', 'CFBundleExecutable': 'Codex',
-                'CFBundleURLTypes': [{'CFBundleURLSchemes': ['codex']}]}
-        (self.bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
-        self.identity = dict(pid=1234, ppid=1, start=[1, 2], executable=str(executable))
-        self.running = Mock()
-        self.running.processIdentifier.return_value = 1234
-        self.running.isTerminated.return_value = False
-        self.running.activateWithOptions_.return_value = True
-        self.apps = Mock(return_value=[self.running])
-        self.start_patch(patch.dict(sys.modules, AppKit=SimpleNamespace(
-            NSRunningApplication=SimpleNamespace(runningApplicationsWithBundleIdentifier_=self.apps,
-                runningApplicationWithProcessIdentifier_=Mock(return_value=self.running)),
-            NSApplicationActivateIgnoringOtherApps=2)))
-        self.start_patch(patch('thread_navigation.sys.platform', 'darwin'))
-        self.process = self.start_patch(patch('thread_navigation.process_identity', return_value=self.identity))
-        self.start_patch(patch('thread_navigation.desktop_bundle', return_value='com.openai.codex'))
-        self.start_patch(patch('thread_navigation.validate_location', side_effect=lambda value: value))
-        self.run = self.start_patch(patch('thread_navigation.subprocess.run', return_value=SimpleNamespace(returncode=0)))
-        self.real_permission = navigation._event_permission
-        self.permission = self.start_patch(patch('thread_navigation._event_permission', return_value=True))
-        self.event = Mock()
-        self.event.sendEventWithOptions_timeout_error_.return_value = (None, None)
-        self.descriptors = SimpleNamespace(
-            descriptorWithProcessIdentifier_=Mock(return_value='pid-address'),
-            descriptorWithString_=Mock(side_effect=lambda text: text),
-            appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID_=Mock(return_value=self.event))
-        self.start_patch(patch.dict(sys.modules, Foundation=SimpleNamespace(
-            NSAppleEventDescriptor=self.descriptors,
-            NSAppleEventSendNoReply=1, NSAppleEventSendNeverInteract=16)))
+        self.bundle = Path(directory.name).resolve() / 'ChatGPT.app'
+        self.exe = self.bundle / 'Contents/MacOS/Codex'
+        self.exe.parent.mkdir(parents=True)
+        self.exe.write_bytes(b'never executed')
+        self.info = {'CFBundleIdentifier': 'com.openai.codex', 'CFBundleExecutable': 'Codex',
+                     'CFBundleURLTypes': [{'CFBundleURLSchemes': ['codex']}]}
+        self.plist = self.bundle / 'Contents/Info.plist'
+        self.write_info()
+        self.target_patch = patch.object(nav, '_MAC_BUNDLE', self.bundle)
+        self.target_patch.start()
+        platform_patch = patch.object(nav.sys, 'platform', 'darwin')
+        platform_patch.start()
+        self.addCleanup(platform_patch.stop)
+        self.addCleanup(self.target_patch.stop)
 
-    def start_patch(self, value):
-        result = value.start()
-        self.addCleanup(value.stop)
+    def write_info(self):
+        self.plist.write_bytes(plistlib.dumps(self.info))
+
+    def test_standard_open_accepts_running_or_unstarted_app(self):
+        for _state in ('running', 'unstarted'):
+            with patch.object(nav.subprocess, 'Popen') as popen:
+                popen.return_value.wait.return_value = 0
+                self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() + 2), 'requested')
+                self.assertEqual(popen.call_args.args[0], [
+                    '/usr/bin/open', '-a', str(self.bundle), 'codex://threads/' + THREAD])
+                self.assertNotIn('-n', popen.call_args.args[0])
+                self.assertNotIn('-W', popen.call_args.args[0])
+
+    def test_bundle_identity_and_scheme_fail_closed(self):
+        for key, value in [('CFBundleIdentifier', 'other'), ('CFBundleExecutable', '../bad'),
+                           ('CFBundleURLTypes', [])]:
+            old = self.info[key]
+            self.info[key] = value
+            self.write_info()
+            with patch.object(nav.subprocess, 'Popen') as popen:
+                self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() + 2), 'unavailable')
+                popen.assert_not_called()
+            self.info[key] = old
+
+    def test_executable_and_bundle_symlinks_rejected(self):
+        real_binary = self.bundle.parent / 'real-binary'
+        self.exe.rename(real_binary)
+        self.exe.symlink_to(real_binary)
+        self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() + 2), 'unavailable')
+        self.exe.unlink()
+        self.exe.write_bytes(b'never executed')
+        real_bundle = self.bundle.parent / 'real.app'
+        self.bundle.rename(real_bundle)
+        self.bundle.symlink_to(real_bundle, target_is_directory=True)
+        self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() + 2), 'unavailable')
+
+    def test_mac_public_api_passes_absolute_deadline(self):
+        deadline = time.monotonic() + 2
+        callback = lambda: True
+        with patch.object(nav, '_supervise_mac', return_value='requested') as supervisor:
+            self.assertEqual(nav.open_thread(THREAD, before_open=callback, deadline=deadline), 'requested')
+            supervisor.assert_called_once_with(THREAD, callback, deadline)
+
+    def test_symlink_or_oversize_plist_rejected(self):
+        self.plist.unlink()
+        other = self.bundle.parent / 'info'
+        other.write_bytes(plistlib.dumps(self.info))
+        self.plist.symlink_to(other)
+        self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() + 2), 'unavailable')
+        self.plist.unlink()
+        self.plist.write_bytes(b'x' * (1024 * 1024 + 1))
+        self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() + 2), 'unavailable')
+
+    def test_invalid_ids_never_spawn(self):
+        with patch.object(nav.subprocess, 'Popen') as popen:
+            for value in (None, '', THREAD + '?x=1', THREAD + '\n', '../elsewhere'):
+                with self.assertRaises(nav.ThreadNavigationError):
+                    nav.open_thread(value)
+            popen.assert_not_called()
+
+    def test_deadline_invalid_or_expired_never_opens(self):
+        with patch.object(nav.subprocess, 'Popen') as popen:
+            for deadline in (float('nan'), float('inf'), time.monotonic() + 10):
+                self.assertEqual(nav.mac_open_chat(THREAD, deadline), 'failed')
+            self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() - 1), 'timeout')
+            popen.assert_not_called()
+
+    def test_deadline_rechecked_after_bundle_validation(self):
+        with patch.object(nav, '_mac_target', side_effect=lambda: time.sleep(.04)), \
+                patch.object(nav.subprocess, 'Popen') as popen:
+            self.assertEqual(nav.mac_open_chat(THREAD, time.monotonic() + .02), 'timeout')
+            popen.assert_not_called()
+
+    def test_helper_dispatch_precedes_db_and_restart_env(self):
+        with patch.dict(os.environ, CSR_WINDOWS_ORDER_FREE='1'), \
+                patch.object(desktop_launcher, 'connection', side_effect=AssertionError('DB')), \
+                patch.object(nav, 'mac_open_chat', return_value='requested') as request, \
+                patch('builtins.print') as output:
+            deadline = str(time.monotonic() + 2)
+            self.assertEqual(desktop_launcher.main(['--open-chat', THREAD, deadline]), 0)
+            request.assert_called_once_with(THREAD, deadline)
+            output.assert_called_once_with('requested', flush=True)
+
+    def test_actual_console_entry_has_no_db_side_effect_or_restart_env_block(self):
+        home = self.bundle.parent / 'unused-state'
+        environment = dict(os.environ, CSR_WINDOWS_ORDER_FREE='1', CODEX_RESUME_HOME=str(home))
+        result = subprocess.run([sys.executable, '-B', str(Path(desktop_launcher.__file__)),
+                                 '--open-chat', THREAD, 'nan'], env=environment,
+                                capture_output=True, timeout=3, check=False)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b'failed\n')
+        self.assertEqual(result.stderr, b'')
+        self.assertFalse(home.exists())
+
+    def test_no_tcc_or_deep_verification_imports(self):
+        source = Path(nav.__file__).read_text()
+        for forbidden in ('AppKit', 'Foundation', 'codesign', 'validate_location', 'AECreateDesc'):
+            self.assertNotIn(forbidden, source)
+
+
+class Supervisor(unittest.TestCase):
+    def run_fake(self, code, before_open=None, budget=.15):
+        children = []
+        real_popen = subprocess.Popen
+        def spawn(*args, **kwargs):
+            child = real_popen([sys.executable, '-c', code], **kwargs)
+            children.append(child)
+            return child
+        start = time.monotonic()
+        with patch.object(nav, '_NAVIGATION_SECONDS', budget), \
+                patch.object(nav.subprocess, 'Popen', side_effect=spawn):
+            result = nav._supervise_mac(THREAD, before_open)
+        self.assertLess(time.monotonic() - start, budget + .6)
+        self.assertTrue(all(child.poll() is not None for child in children))
         return result
 
-    def test_requests_exact_uri_only_in_verified_running_app(self):
-        navigation.open_thread(THREAD)
-        signature, = self.run.call_args_list
-        self.assertEqual(signature.args[0][0], '/usr/bin/codesign')
-        self.assertIn('--deep', signature.args[0])
-        self.descriptors.descriptorWithProcessIdentifier_.assert_called_once_with(1234)
-        self.event.setParamDescriptor_forKeyword_.assert_called_once_with(
-            'codex://threads/' + THREAD, int.from_bytes(b'----', 'big'))
-        self.event.sendEventWithOptions_timeout_error_.assert_called_once_with(0x00020011, 5, None)
-        self.running.activateWithOptions_.assert_called_once_with(2)
+    @unittest.skipUnless(os.name == 'posix', 'POSIXプロセスグループの実回収')
+    def test_actual_hung_owned_child_is_reaped(self):
+        self.assertEqual(self.run_fake('import time; time.sleep(60)'), 'timeout')
 
-    def test_address_matches_sdk_two_byte_packing(self):
-        self.assertEqual(navigation._Address.data_handle.offset, 4)
-        self.assertEqual(ctypes.sizeof(navigation._Address), 4 + ctypes.sizeof(ctypes.c_void_p))
+    @unittest.skipUnless(os.name == 'posix', 'POSIXプロセスグループの実回収')
+    def test_cancel_reaps_owned_child(self):
+        calls = []
+        def active():
+            calls.append(1)
+            return len(calls) < 3
+        self.assertEqual(self.run_fake('import time; time.sleep(60)', active), 'cancelled')
 
-    def test_invalid_identifiers_never_request_open(self):
-        for value in ('', None, '../elsewhere', THREAD + '?hostId=elsewhere', THREAD + '\n'):
-            with self.subTest(value=value), self.assertRaises(navigation.ThreadNavigationError):
-                navigation.open_thread(value)
-        self.run.assert_not_called()
-        self.apps.assert_not_called()
+    @unittest.skipUnless(os.name == 'posix', 'POSIXプロセスグループの実回収')
+    def test_fixed_status_and_unexpected_or_oversized_output(self):
+        self.assertEqual(self.run_fake('print("requested")', budget=1), 'requested')
+        self.assertEqual(self.run_fake('print("requested\\nextra")', budget=1), 'failed')
+        self.assertEqual(self.run_fake('print("x"*100000)', budget=.2), 'timeout')
 
-    def test_missing_multiple_or_terminated_apps_never_launch(self):
-        for apps in ([], [self.running, self.running]):
-            self.apps.return_value = apps
-            with self.assertRaises(navigation.ThreadNavigationError):
-                navigation.open_thread(THREAD)
-        self.apps.return_value = [self.running]
-        self.running.isTerminated.return_value = True
-        with self.assertRaises(navigation.ThreadNavigationError):
-            navigation.open_thread(THREAD)
-        self.run.assert_not_called()
+    @unittest.skipUnless(os.name == 'posix', 'POSIXプロセスグループの実回収')
+    def test_existing_deadline_is_not_extended(self):
+        with patch.object(nav.subprocess, 'Popen') as popen:
+            self.assertEqual(nav._supervise_mac(THREAD, None, time.monotonic() - 1), 'timeout')
+            popen.assert_not_called()
+        remaining = time.monotonic() + .06
+        started = time.monotonic()
+        with patch.object(nav, '_helper_command', return_value=[sys.executable, '-c',
+                'import time; time.sleep(60)']):
+            self.assertEqual(nav._supervise_mac(THREAD, None, remaining), 'timeout')
+        self.assertLess(time.monotonic() - started, .6)
 
-    def test_failed_signature_does_not_open(self):
-        self.run.return_value.returncode = 1
-        with self.assertRaises(navigation.ThreadNavigationError):
-            navigation.open_thread(THREAD)
-        self.assertEqual(self.run.call_count, 1)
+    def test_missing_helper_and_spawn_failure_have_fixed_status(self):
+        with patch.object(nav, '_helper_command', side_effect=FileNotFoundError('private')):
+            self.assertEqual(nav._supervise_mac(THREAD, None), 'unavailable')
+        with patch.object(nav.subprocess, 'Popen', side_effect=OSError('private')):
+            self.assertEqual(nav._supervise_mac(THREAD, None), 'failed')
 
-    def test_changed_identity_does_not_open(self):
-        self.process.side_effect = [self.identity, dict(self.identity, start=[3, 4])]
-        with self.assertRaises(navigation.ThreadNavigationError):
-            navigation.open_thread(THREAD)
-        self.assertEqual(self.run.call_count, 1)
+    def test_frozen_helper_is_sibling_and_source_uses_no_gui_launcher(self):
+        deadline = time.monotonic() + 2
+        with patch.object(nav.sys, 'frozen', True, create=True), \
+                patch.object(nav.sys, 'executable', '/bundle/CodexSafeResume'), \
+                patch.object(Path, 'is_file', return_value=True):
+            self.assertEqual(nav._helper_command(THREAD, deadline), [
+                '/bundle/CodexSafeResumeBridge', '--open-chat', THREAD, str(deadline)])
+        with patch.object(nav.sys, 'frozen', False, create=True):
+            command = nav._helper_command(THREAD, deadline)
+            self.assertEqual(command[:2], [sys.executable, '-B'])
+            self.assertEqual(Path(command[2]).name, 'desktop_launcher.py')
 
-    def test_missing_uri_support_does_not_open(self):
-        path = self.bundle / 'Contents/Info.plist'
-        info = plistlib.loads(path.read_bytes())
-        info['CFBundleURLTypes'] = []
-        path.write_bytes(plistlib.dumps(info))
-        with self.assertRaises(navigation.ThreadNavigationError):
-            navigation.open_thread(THREAD)
-        self.run.assert_not_called()
+    def test_cancellation_requires_exact_true(self):
+        for value in (False, None, 1, 'yes'):
+            with patch.object(nav.subprocess, 'Popen') as popen:
+                self.assertEqual(nav._supervise_mac(THREAD, lambda: value), 'cancelled')
+                popen.assert_not_called()
 
-    def test_failures_do_not_disclose_paths_or_native_errors(self):
-        self.run.side_effect = OSError(str(self.bundle))
-        with self.assertRaises(navigation.ThreadNavigationError) as caught:
-            navigation.open_thread(THREAD)
-        self.assertNotIn(str(self.bundle), str(caught.exception))
 
-    def test_unverified_platform_has_no_fallback(self):
-        for platform in ('linux',):
-            with patch('thread_navigation.sys.platform', platform):
-                with self.assertRaises(navigation.ThreadNavigationError):
-                    navigation.open_thread(THREAD)
-        self.run.assert_not_called()
-        self.apps.assert_not_called()
-
-    def test_cancelled_request_does_not_dispatch_after_verification(self):
-        with self.assertRaises(navigation.ThreadNavigationError):
-            navigation.open_thread(THREAD, before_open=lambda: False)
-        self.assertEqual(self.run.call_count, 1)
-        self.assertEqual(self.run.call_args.args[0][0], '/usr/bin/codesign')
-
-    def test_confirmation_must_be_exact_true(self):
-        for value in (None, 1, 'yes'):
-            with self.subTest(value=value), self.assertRaises(navigation.ThreadNavigationError):
-                navigation.open_thread(THREAD, before_open=lambda: value)
-        self.assertTrue(all(item.args[0][0] == '/usr/bin/codesign'
-                            for item in self.run.call_args_list))
-
-    def test_missing_event_permission_does_not_prompt_or_send(self):
-        self.permission.return_value = False
-        with self.assertRaises(navigation.ThreadNavigationError):
-            navigation.open_thread(THREAD)
-        self.event.sendEventWithOptions_timeout_error_.assert_not_called()
-        self.assertEqual(self.run.call_count, 1)
-
-    def test_exited_target_cannot_trigger_application_launch(self):
-        self.event.sendEventWithOptions_timeout_error_.return_value = (None, Mock())
-        with self.assertRaises(navigation.ThreadNavigationError):
-            navigation.open_thread(THREAD)
-        self.descriptors.descriptorWithProcessIdentifier_.assert_called_once_with(1234)
-        self.assertEqual(self.run.call_count, 1)
-        self.running.activateWithOptions_.assert_not_called()
-
-    def test_permission_probe_never_prompts_and_releases_address(self):
-        library = Mock()
-        library.AECreateDesc.return_value = 0
-        for result in (0, -1743, -1744, -600):
-            library.reset_mock()
-            library.AEDeterminePermissionToAutomateTarget.return_value = result
-            with patch('thread_navigation.ctypes.CDLL', return_value=library):
-                self.assertEqual(self.real_permission(1234), result == 0)
-            self.assertIs(library.AEDeterminePermissionToAutomateTarget.call_args.args[-1], False)
-            library.AEDisposeDesc.assert_called_once()
-
-    def test_failed_address_creation_never_probes_or_sends(self):
-        library = Mock()
-        library.AECreateDesc.return_value = -1
-        with patch('thread_navigation.ctypes.CDLL', return_value=library):
-            self.assertFalse(self.real_permission(1234))
-        library.AEDeterminePermissionToAutomateTarget.assert_not_called()
-        library.AEDisposeDesc.assert_not_called()
+if __name__ == '__main__':
+    unittest.main()

@@ -316,7 +316,7 @@ class GuiControls(unittest.TestCase):
         buttons = {options.get('text'): (widget, options) for kind, widget, _, options in records if kind == 'Button'}
         self.assertEqual(set(buttons), {
             '自動再開をON', '接続の確認・修復…', '一覧・利用枠を更新',
-            '詳細表示（プロジェクト・並べ替え）', '実行・監視中を上に戻す', 'Codexで開く'})
+            '詳細表示（プロジェクト・並べ替え）', '実行・監視中を上に戻す', 'ChatGPTで開く'})
         buttons['自動再開をON'][1]['command']()
         gui.toggle_auto_watch.assert_called_once()
         orientations = {options['orient'] for kind, _, _, options in records if kind == 'Scrollbar'}
@@ -377,8 +377,8 @@ class GuiControls(unittest.TestCase):
         gui.tree.selection.return_value = ('previous-id',)
         gui.db, gui.write, gui.toggle, gui.change_target, gui.finish = Mock(), Mock(), Mock(), Mock(), Mock()
         error = type('ThreadNavigationError', (Exception,), {})
-        navigator = SimpleNamespace(open_thread=Mock(), ThreadNavigationError=error)
-        with patch.dict(sys.modules, {'thread_navigation': navigator}):
+        navigator = SimpleNamespace(open_thread=Mock(return_value=True), ThreadNavigationError=error)
+        with patch('app.request_chat_open', navigator.open_thread):
             for region, row in [('heading', 'clicked-id'), ('nothing', ''), ('cell', ''), ('separator', 'clicked-id')]:
                 gui.tree.identify_region.return_value = region
                 gui.tree.identify_row.return_value = row
@@ -403,23 +403,23 @@ class GuiControls(unittest.TestCase):
         gui = self.gui()
         records = self.build(gui)
         open_button = next(options['command'] for kind, _, _, options in records
-                           if kind == 'Button' and options.get('text') == 'Codexで開く')
+                           if kind == 'Button' and options.get('text') == 'ChatGPTで開く')
         gui.selected = Mock(return_value=None)
         gui.write = Mock()
         error = type('ThreadNavigationError', (Exception,), {})
         navigator = SimpleNamespace(open_thread=Mock(side_effect=error('private failure')), ThreadNavigationError=error)
-        with patch.dict(sys.modules, {'thread_navigation': navigator}), patch('app.messagebox') as dialogs:
+        with patch('app.request_chat_open', navigator.open_thread), patch('app.messagebox') as dialogs:
             open_button()
             navigator.open_thread.assert_not_called()
-            dialogs.showinfo.assert_called_once()
+            dialogs.showinfo.assert_not_called()
             gui.selected.return_value = 'selected-id'
             open_button()
             gui.navigation_thread.join(1)
             gui.drain_navigation()
             self.assertEqual(navigator.open_thread.call_args.args, ('selected-id',))
-            dialogs.showwarning.assert_called_once()
-            self.assertNotIn('private failure', dialogs.showwarning.call_args.args[1])
-            gui.write.assert_not_called()
+            dialogs.showwarning.assert_not_called()
+            self.assertNotIn('private failure', gui.status.set.call_args.args[0])
+            gui.write.assert_called_once()
 
     def test_navigation_returns_while_worker_waits_and_rejects_duplicate_requests(self):
         gui = self.gui()
@@ -428,14 +428,14 @@ class GuiControls(unittest.TestCase):
         gui.write = Mock()
         entered, release = threading.Event(), threading.Event()
         worker_threads = []
-        def open_thread(tid, *, before_open=lambda: True):
+        def open_thread(tid, *, before_open=lambda: True, deadline=None):
             worker_threads.append(threading.get_ident())
             entered.set()
             release.wait(1)
             self.assertTrue(before_open())
         navigator = SimpleNamespace(open_thread=Mock(side_effect=open_thread),
                                     ThreadNavigationError=type('ThreadNavigationError', (Exception,), {}))
-        with patch.dict(sys.modules, {'thread_navigation': navigator}):
+        with patch('app.request_chat_open', navigator.open_thread):
             try:
                 gui.open_selected_chat()
                 self.assertTrue(entered.wait(1))
@@ -461,14 +461,14 @@ class GuiControls(unittest.TestCase):
         gui.selected = Mock(return_value='first')
         gui.write, gui.db = Mock(), Mock()
         entered, release, dispatched = threading.Event(), threading.Event(), threading.Event()
-        def open_thread(tid, *, before_open=lambda: True):
+        def open_thread(tid, *, before_open=lambda: True, deadline=None):
             entered.set()
             release.wait(1)
             if before_open():
                 dispatched.set()
         navigator = SimpleNamespace(open_thread=Mock(side_effect=open_thread),
                                     ThreadNavigationError=type('ThreadNavigationError', (Exception,), {}))
-        with patch.dict(sys.modules, {'thread_navigation': navigator}), patch('app.set_auto_watch'), patch(
+        with patch('app.request_chat_open', navigator.open_thread), patch('app.set_auto_watch'), patch(
                 'queue_state.pending', return_value=[]):
             try:
                 gui.open_selected_chat()
@@ -492,15 +492,15 @@ class GuiControls(unittest.TestCase):
         gui.selected, gui.write = Mock(return_value='first'), Mock()
         navigator = SimpleNamespace(open_thread=Mock(side_effect=RuntimeError('private failure')),
                                     ThreadNavigationError=type('ThreadNavigationError', (Exception,), {}))
-        with patch.dict(sys.modules, {'thread_navigation': navigator}), patch('app.messagebox') as dialogs:
+        with patch('app.request_chat_open', navigator.open_thread), patch('app.messagebox') as dialogs:
             gui.open_selected_chat()
             gui.navigation_thread.join(1)
             gui.drain_navigation()
             self.assertFalse(gui.navigation_pending)
             gui.navigation_button.configure.assert_called_with(state='normal')
-            dialogs.showwarning.assert_called_once()
-            self.assertNotIn('private failure', dialogs.showwarning.call_args.args[1])
-            gui.write.assert_not_called()
+            dialogs.showwarning.assert_not_called()
+            self.assertNotIn('private failure', gui.status.set.call_args.args[0])
+            gui.write.assert_called_once()
 
     def test_confirmed_shutdown_stops_mainloop_before_destroy(self):
         gui = self.gui()
