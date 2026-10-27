@@ -306,6 +306,7 @@ class GUI:
         self.root = tk.Tk()
         self.root.title('Codex Safe Resume')
         self.configure_window()
+        self.configure_window_icon()
         self.db = connection()
         self.simple_mode = True
         self.initialize_auto_policy()
@@ -658,6 +659,13 @@ class GUI:
         y = max(0, (screen_height - height) // 2 - 20)
         window.geometry(f'{width}x{height}+{x}+{y}')
         window.minsize(min(620, width), min(420, height))
+
+    def configure_window_icon(self):
+        if sys.platform != 'win32':
+            return
+        from PIL import Image, ImageDraw, ImageTk
+        self.window_icon = ImageTk.PhotoImage(create_tray_image(Image, ImageDraw), master=self.root)
+        self.root.iconphoto(True, self.window_icon)
 
     def configure_reopen(self):
         if sys.platform == 'darwin':
