@@ -65,7 +65,7 @@ class DesktopStdioTests(unittest.TestCase):
             writer.write(payload)
         return reader, writer
 
-    def proxy(self, action):
+    def proxy(self, action, *, skip_utf8_validation=False):
         client, peer = socket.socketpair()
         self.sockets.extend([client, peer])
         peer.settimeout(5)
@@ -85,7 +85,7 @@ class DesktopStdioTests(unittest.TestCase):
                 peer.sendall(b'HTTP/1.1 101 Switching Protocols\r\n'
                              b'Upgrade: websocket\r\nConnection: Upgrade\r\n'
                              b'Sec-WebSocket-Accept: ' + accept + b'\r\n\r\n')
-                server = websocket.WebSocket()
+                server = websocket.WebSocket(skip_utf8_validation=skip_utf8_validation)
                 server.sock = peer
                 server.connected = True
                 action(server, peer)
@@ -357,7 +357,8 @@ class DesktopStdioTests(unittest.TestCase):
         def action(server, peer):
             observed.append(server.recv())
             received.set()
-        raw = self.proxy(action)
+        # recv still strictly decodes UTF-8; avoid its duplicate Python scan.
+        raw = self.proxy(action, skip_utf8_validation=True)
         reader, writer = self.input_pipe()
         def produce():
             # Keep stdin open until the full frame is observed. EOF cancels the
