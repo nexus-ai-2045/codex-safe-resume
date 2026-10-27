@@ -261,6 +261,54 @@ class GuiControls(unittest.TestCase):
                 self.assertLessEqual(gui.root.minsize.call_args.args[1], height)
                 gui.root.state.assert_not_called()
 
+    def test_windows_default_window_icon_reuses_shared_artwork_and_keeps_photo_alive(self):
+        from PIL import Image, ImageDraw
+        gui = self.gui()
+        artwork, photo = object(), object()
+        allocate = Mock(return_value=photo)
+        with patch('app.sys.platform', 'win32'), patch(
+                'app.create_tray_image', return_value=artwork) as render, patch(
+                'PIL.ImageTk', SimpleNamespace(PhotoImage=allocate), create=True):
+            gui.configure_window_icon()
+        render.assert_called_once_with(Image, ImageDraw)
+        allocate.assert_called_once_with(artwork, master=gui.root)
+        self.assertIs(gui.window_icon, photo)
+        gui.root.iconphoto.assert_called_once_with(True, photo)
+
+    def test_non_windows_window_icon_does_not_import_or_allocate_gui_images(self):
+        for platform in ('darwin', 'linux'):
+            with self.subTest(platform=platform):
+                gui = self.gui()
+                with patch('app.sys.platform', platform), patch(
+                        'builtins.__import__', side_effect=AssertionError('画像を読み込まない')):
+                    gui.configure_window_icon()
+                gui.root.iconphoto.assert_not_called()
+                self.assertFalse(hasattr(gui, 'window_icon'))
+
+    def test_windows_window_icon_errors_are_not_silently_ignored(self):
+        gui = self.gui()
+        image_tk = SimpleNamespace(PhotoImage=Mock(side_effect=RuntimeError('icon failure')))
+        with patch('app.sys.platform', 'win32'), patch(
+                'app.create_tray_image', return_value=object()), patch(
+                'PIL.ImageTk', image_tk, create=True):
+            with self.assertRaisesRegex(RuntimeError, 'icon failure'):
+                gui.configure_window_icon()
+        gui.root.iconphoto.assert_not_called()
+
+    def test_default_window_icon_is_set_once_before_database_initialization(self):
+        gui = app.GUI.__new__(app.GUI)
+        order = Mock()
+        order.root = Mock()
+        with patch('app.tk', SimpleNamespace(Tk=Mock(return_value=order.root))), patch.object(
+                gui, 'configure_window', order.geometry), patch.object(
+                gui, 'configure_window_icon', order.icon), patch(
+                'app.connection', order.database):
+            order.database.side_effect = RuntimeError('DB boundary')
+            with self.assertRaisesRegex(RuntimeError, 'DB boundary'):
+                gui.__init__()
+        self.assertEqual(order.mock_calls, [call.root.title('Codex Safe Resume'),
+                                          call.geometry(), call.icon(), call.database()])
+
     def test_controls_use_explicit_actions_and_both_scroll_directions(self):
         gui = self.gui()
         gui.toggle_auto_watch = Mock()
