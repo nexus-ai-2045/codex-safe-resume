@@ -415,6 +415,66 @@ class QueueAttestationTests(unittest.TestCase):
         with mock.patch.object(pathlib.Path, 'mkdir', side_effect=AssertionError('write')):
             self.assertTrue(self.attestation.matches(proof))
 
+    def test_unrelated_ancestor_sibling_directory_addition_and_removal_are_allowed(self):
+        target = self.root / 'target'
+        target.mkdir()
+        executable = target / 'codex'
+        executable.write_bytes(b'original signed bytes')
+        sibling = self.root / 'unrelated'
+        original_lstat = pathlib.Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            info = original_lstat(path, *args, **kwargs)
+            if path == self.root:
+                fields = {name: getattr(info, name) for name in dir(info)
+                          if name.startswith('st_')}
+                fields['st_nlink'] = 4 if sibling.exists() else 3
+                return types.SimpleNamespace(**fields)
+            return info
+
+        with mock.patch.object(pathlib.Path, 'lstat', lstat):
+            proof = self.attestation.capture([executable], tree=target)
+            self.assertTrue(self.attestation.matches(proof))
+            sibling.mkdir()
+            self.assertTrue(self.attestation.matches(proof))
+            sibling.rmdir()
+            self.assertTrue(self.attestation.matches(proof))
+
+    def test_added_directory_inside_sealed_tree_is_denied(self):
+        proof = self.attestation.capture([self.file], tree=self.root)
+        (self.root / 'injected').mkdir()
+        self.assertFalse(self.attestation.matches(proof))
+
+    def test_identical_directory_replacement_is_denied(self):
+        target = self.root / 'target'
+        target.mkdir()
+        executable = target / 'codex'
+        executable.write_bytes(b'original signed bytes')
+        proof = self.attestation.capture([executable], tree=target)
+        original_target = target.rename(self.root / 'original-target')
+        target.mkdir()
+        (original_target / 'codex').rename(executable)
+        self.assertFalse(self.attestation.matches(proof))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX directory mode changes')
+    def test_ancestor_directory_mode_change_is_denied(self):
+        proof = self.attestation.capture([self.file])
+        before = self.root.stat().st_mode
+        self.root.chmod(before ^ 0o020)
+        self.addCleanup(self.root.chmod, before)
+        self.assertFalse(self.attestation.matches(proof))
+
+    def test_regular_file_hardlink_addition_is_denied(self):
+        proof = self.attestation.capture([self.file])
+        os.link(self.file, self.root / 'hardlink')
+        try:
+            matches = self.attestation.matches(proof)
+        except ValueError:
+            matches = False
+        self.assertFalse(matches)
+        with self.assertRaises(ValueError):
+            self.attestation.capture([self.file])
+
     def test_changed_bytes_with_restored_size_and_mtime_are_denied(self):
         proof = self.attestation.capture([self.file])
         before = self.file.stat()
