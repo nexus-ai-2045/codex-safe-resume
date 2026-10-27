@@ -11,6 +11,7 @@ import time
 import re
 from contextlib import closing
 from app_icons import create_tray_image
+from thread_navigation import open_thread as request_chat_open
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog, font as tkfont
@@ -1001,7 +1002,7 @@ class GUI:
         selected_menu.add_command(label='確認して選び直す（試行履歴は保持）', command=self.review_reset)
         selected_menu.add_command(label='詳細情報（ID・場所）', command=self.show_technical_details)
         selected_actions.configure(menu=selected_menu)
-        self.navigation_button = ttk.Button(target_panel, text='Codexで開く', command=self.open_selected_chat)
+        self.navigation_button = ttk.Button(target_panel, text='ChatGPTで開く', command=self.open_selected_chat)
         self.navigation_button.grid(row=0, column=2, padx=(8, 0), sticky='e')
         footer = ttk.Frame(body, style='Main.TFrame', padding=(16, 0, 16, 4))
         footer.grid(row=6, column=0, sticky='ew')
@@ -1447,8 +1448,10 @@ class GUI:
         self.refresh()
 
     def update_status(self, count, *, configured=None):
+        feedback = getattr(self, 'navigation_feedback', '')
+        suffix = '\n' + feedback if feedback else ''
         if getattr(self, 'simple_mode', False):
-            self.status.set(f'表示 {count}件  |  全体OFFでも個別の対象指定は保持します')
+            self.status.set(f'表示 {count}件  |  全体OFFでも個別の対象指定は保持します' + suffix)
             return
         if configured is None:
             configured = display_connection_ready(connection_options(self.db))
@@ -1457,7 +1460,7 @@ class GUI:
         mode = (f'監視対象 {enabled}件（接続結果は監視ログに表示）' if configured else
                 '自動再開: 接続未設定のため送信停止')
         order = {'title': 'チャット名', 'project': 'プロジェクト', 'status': '状態', 'auto': '自動再開', 'reset': '回復予定'}.get(getattr(self, 'sort_column', None), '実行・監視優先')
-        self.status.set(f'検出 {len(visible_ids)} 件 / 表示 {count} 件  |  並び順: {order}  |  {mode}')
+        self.status.set(f'検出 {len(visible_ids)} 件 / 表示 {count} 件  |  並び順: {order}  |  {mode}' + suffix)
 
     @staticmethod
     def target_text(row):
@@ -1525,24 +1528,36 @@ class GUI:
             self.tree.selection_set(tid)
             self.select_row()
         else:
-            tid = self.require_selected()
+            tid = self.selected()
             if not tid:
+                self.navigation_feedback = 'ChatGPTで開くチャットを一覧から選んでください。'
+                self.status.set(self.navigation_feedback)
                 return
         self.navigation_cancel = threading.Event()
         self.navigation_results = queue.Queue(maxsize=1)
+        self.navigation_started = time.monotonic()
+        deadline = self.navigation_started + 3 if sys.platform == 'darwin' else None
+        self.navigation_deadline = deadline
+        self.navigation_timed_out = False
+        generation = self.navigation_generation = getattr(self, 'navigation_generation', 0) + 1
         self.navigation_pending = True
         self.navigation_button.configure(state='disabled')
+        self.navigation_feedback = 'ChatGPTへチャットの表示を要求しています。'
+        self.status.set(self.navigation_feedback)
         cancelled, results = self.navigation_cancel, self.navigation_results
 
         def worker():
             outcome = 'failed'
             try:
-                from thread_navigation import open_thread
                 def before_open():
                     return not cancelled.is_set() and not self.closing
                 if before_open():
-                    open_thread(tid, before_open=before_open)
-                    outcome = 'requested' if before_open() else 'cancelled'
+                    result = request_chat_open(tid, before_open=before_open, deadline=deadline)
+                    outcomes = ('requested', 'unavailable', 'timeout', 'cancelled', 'failed')
+                    outcome = ('requested' if result is True else result
+                               if isinstance(result, str) and result in outcomes else 'failed')
+                    if not before_open():
+                        outcome = 'cancelled'
                 else:
                     outcome = 'cancelled'
             except Exception:
@@ -1557,30 +1572,49 @@ class GUI:
             self.navigation_thread.start()
         except Exception:
             self.navigation_results.put_nowait('failed')
-        self.root.after(100, self.drain_navigation)
+        self.root.after(100, lambda: self.drain_navigation(generation))
         return 'break' if event is not None else None
 
-    def drain_navigation(self):
+    def drain_navigation(self, generation=None):
+        current = getattr(self, 'navigation_generation', 0)
+        if generation is not None and generation != current:
+            return
         if not getattr(self, 'navigation_pending', False):
             return
         if self.closing:
             self.navigation_cancel.set()
             return
         if self.navigation_thread.is_alive():
-            self.root.after(100, self.drain_navigation)
+            deadline = getattr(self, 'navigation_deadline', None)
+            if deadline is not None and time.monotonic() >= deadline:
+                self.navigation_timed_out = True
+                self.navigation_cancel.set()
+                self.navigation_feedback = '表示要求の確認時間を超えました。補助処理を終了しています。'
+                self.status.set(self.navigation_feedback)
+            self.root.after(100, lambda: self.drain_navigation(current))
             return
         try:
             outcome = self.navigation_results.get_nowait()
         except queue.Empty:
             outcome = 'failed'
+        if getattr(self, 'navigation_timed_out', False):
+            outcome = 'timeout'
         self.navigation_pending = False
         self.navigation_button.configure(state='normal')
-        if outcome == 'requested':
-            self.write('Codexに元のチャットを開くよう要求しました。')
-        elif outcome == 'failed':
-            messagebox.showwarning('表示結果を確認できません',
-                                   '元のチャットを開く要求の結果を確認できません。Codex側で対象を確認してください。',
-                                   parent=self.root)
+        messages = {
+            'requested': 'ChatGPTに元のチャットの表示を要求しました。実際の表示先を確認してください。',
+            'unavailable': 'ChatGPTを利用できません。アプリの配置を確認してください。',
+            'timeout': '表示要求の確認時間を超えました。ChatGPTの表示先を確認してください。自動再試行はしません。',
+            'cancelled': 'チャットの表示要求を取り消しました。',
+            'failed': '表示要求の結果を確認できません。ChatGPT側で対象を確認してください。',
+        }
+        message = messages.get(outcome, messages['failed'])
+        elapsed = max(0, time.monotonic() - getattr(self, 'navigation_started', time.monotonic()))
+        message += f'（処理 {elapsed:.1f}秒）'
+        self.navigation_feedback = message
+        self.status.set(message)
+        if outcome != 'cancelled':
+            self.write(message)
 
     def show_technical_details(self):
         tid = self.require_selected()
