@@ -26,6 +26,17 @@ PY_SMOKE
 "$PYTHON" -m PyInstaller --noconfirm --clean --console --onefile --name CodexSafeResumeBridge --distpath dist/bridge --workpath build/bridge --specpath build desktop_launcher.py >> "$BUILD_LOG" 2>&1 || { echo 'Desktop接続用プログラムをビルドできません。' >&2; exit 1; }
 cp dist/bridge/CodexSafeResumeBridge "$APP/Contents/MacOS/CodexSafeResumeBridge"
 chmod 755 "$APP/Contents/MacOS/CodexSafeResumeBridge"
+# macOS 26向けの一時的な旧UI互換設定。性能・クラッシュ対策とは別。
+# Appleの仕様上、SDK 27以降でビルドするとこのキーは無視される。
+"$PYTHON" - "$APP/Contents/Info.plist" >> "$BUILD_LOG" 2>&1 <<'PY_UI_COMPAT' || { echo '旧UI互換設定を適用できません。'; exit 1; }
+from pathlib import Path
+import plistlib
+import sys
+path = Path(sys.argv[1])
+value = plistlib.loads(path.read_bytes())
+value['UIDesignRequiresCompatibility'] = True
+path.write_bytes(plistlib.dumps(value))
+PY_UI_COMPAT
 # No trusted publisher identity or notarization; ad-hoc only.
 codesign --force --deep --sign - "$APP" >> "$BUILD_LOG" 2>&1 || { echo '署名を付けられません。' >&2; exit 1; }
 codesign --verify --deep --strict "$APP" >> "$BUILD_LOG" 2>&1 || { echo '署名を検査できません。' >&2; exit 1; }
