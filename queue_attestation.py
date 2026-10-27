@@ -81,7 +81,8 @@ def _security(path):
 
 def _metadata(info):
     mode = info.st_mode & ~0o111 if os.name == 'nt' else info.st_mode
-    return (info.st_dev, info.st_ino, mode, info.st_nlink,
+    links = None if stat.S_ISDIR(info.st_mode) else info.st_nlink
+    return (info.st_dev, info.st_ino, mode, links,
             info.st_uid, info.st_gid, getattr(info, 'st_file_attributes', 0))
 
 
