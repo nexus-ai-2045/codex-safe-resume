@@ -426,9 +426,10 @@ class QueueAttestationTests(unittest.TestCase):
         def lstat(path, *args, **kwargs):
             info = original_lstat(path, *args, **kwargs)
             if path == self.root:
-                fields = list(info)
-                fields[3] = 4 if sibling.exists() else 3
-                return os.stat_result(fields)
+                fields = {name: getattr(info, name) for name in dir(info)
+                          if name.startswith('st_')}
+                fields['st_nlink'] = 4 if sibling.exists() else 3
+                return types.SimpleNamespace(**fields)
             return info
 
         with mock.patch.object(pathlib.Path, 'lstat', lstat):
