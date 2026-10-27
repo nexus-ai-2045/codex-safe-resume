@@ -2,9 +2,9 @@
 
 # 公開前検査と受入の境界
 
-Codex Safe Resumeは、本人の承認に基づき実験版ソースをPublic公開しています。現在のbridgeは安全な送信能力が未確立のため、実際の自動送信を停止します。ソース公開・CI成功・アプリ完成を区別します。
+Codex Safe Resumeは、本人の承認に基づき実験版ソースをPublic公開しています。専用会話への手動送信は実測していますが、自然な利用枠停止からの自動再開を含む両OSの実機受入は未完了です。通常設定をOFFに保って検証し、ソース公開・CI成功・アプリ完成を区別します。
 
-最新の対象SHA、実施結果、証拠、未達、担当と次の操作は[Issue #11](https://github.com/nexus-ai-2045/codex-safe-resume/issues/11)を正本とします。旧repoのPR結果を、新repoの検証結果として流用しません。
+V1の対象SHA、実施結果、証拠、未達、担当と次の操作は[Issue #5](https://github.com/nexus-ai-2045/codex-safe-resume/issues/5)を正本とします。V2の追加機能は[Issue #10](https://github.com/nexus-ai-2045/codex-safe-resume/issues/10)へ保留し、V1の完成条件には含めません。旧repoのPR結果を、新repoの検証結果として流用しません。
 
 ## 機械検査
 

@@ -1,10 +1,12 @@
 # 公開判断：実験版ソースは公開済み、完成判定は保留
 
-2026-10-18の会話で、本人が新repo `nexus-ai-2045/codex-safe-resume` の先行Public化を明示承認し、検査後に実行・読戻ししました。対象の不変IDは1423845391です。旧repoの不変ID1423695313とは区別します。
+現行repo `nexus-ai-2045/codex-safe-resume` の不変IDは1431927316です。V1の実機受入と完成判定は[Issue #5](https://github.com/nexus-ai-2045/codex-safe-resume/issues/5)へ集約します。
+
+過去の公開記録として、2026-10-18の会話では移行前repoの先行Public化を本人が明示承認し、検査後に実行・読戻ししました。当時の対象の不変IDは1423845391、それ以前の旧repoは1423695313でした。この記録を現行repoの受入証拠へ読み替えません。
 
 公開対象はファイルと新規Git履歴を含む実験版ソースです。旧Git履歴は引き継いでいません。これはアプリ完成、安定版の配布、実際の自動再開成功の承認ではありません。接続未設定時は送信せず、設定後のアプリ側再照合方式も両OSでの実機受入を必要とします。
 
-最新の検査結果・対象SHA・公開状態・残務は[Issue #11](https://github.com/nexus-ai-2045/codex-safe-resume/issues/11)を正本とします。過去のCI利用不能と、Public化後に実行した検査を分けて記録します。
+最新の検査結果・対象SHA・公開状態・残務は[Issue #5](https://github.com/nexus-ai-2045/codex-safe-resume/issues/5)を正本とします。V2の追加機能は[Issue #10](https://github.com/nexus-ai-2045/codex-safe-resume/issues/10)で保留し、V1の完了条件には含めません。過去のCI利用不能と、Public化後に実行した検査を分けて記録します。
 
 ## 安定版と判定する条件
 
