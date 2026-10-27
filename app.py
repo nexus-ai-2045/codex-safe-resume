@@ -92,8 +92,13 @@ def usage_executable(config):
     raise ValueError('公式CLIを選択してください')
 
 
-def read_usage_status(config):
+def read_usage_status(config, *, cancel=None):
     """表示用の取得元だけを照合。既存共有接続への読取り以外は行わない。"""
+    def check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise UsageReadError('利用枠の読取りを中止しました')
+
+    check_cancel()
     peer = None
     state = 'not_configured'
     if config:
@@ -101,23 +106,29 @@ def read_usage_status(config):
         try:
             # 古いpinで共有接続へ触れず、表示用bundleの重い検証は最後に一度だけ。
             validate_executable(config, require_confirmation=False)
+            check_cancel()
             if config.get('mode') == 'queue':
                 from queue_bridge import QueueBridge
                 selected = QueueBridge(config=config, for_pending=True, timeout=3)
             else:
                 selected = DesktopBridge(config=config, transport_only=True, timeout=3)
             with selected as bridge:
+                check_cancel()
                 if config.get('mode') == 'queue' and bridge.capabilities().get('desktop_binding') is not True:
                     raise ValueError('起動中のCodexを確認できません')
+                check_cancel()
                 peer = bridge.quota()
                 state = 'read'
         except Exception:
             pass
+    check_cancel()
     # 共有接続の確認中にCLIが更新されても、古いpin検証で起動しない。
     executable = usage_executable(config)
+    check_cancel()
     try:
-        result = read_limits(executable, peer_reply=peer)
+        result = read_limits(executable, peer_reply=peer, cancel=cancel)
     except UsageReadError:
+        check_cancel()
         if peer is None:
             raise
         # CLI側が未取得でも、読めた共有接続の値をCLIの値と偽らず表示する。
@@ -309,6 +320,7 @@ class GUI:
         self.monitor_thread = None
         self.usage_running = False
         self.usage_thread = None
+        self.usage_cancel = None
         self.usage_queue = queue.Queue(maxsize=1)
         self.navigation_pending = False
         self.navigation_thread = None
@@ -781,9 +793,10 @@ class GUI:
         config = connection_options(self.db)
         signature = json.dumps(config, sort_keys=True)
         self.usage_running = True
+        cancel = self.usage_cancel = threading.Event()
         def worker():
             try:
-                result = read_usage_status(config)
+                result = read_usage_status(config, cancel=cancel)
             except Exception:
                 result = None
             try:
@@ -1808,6 +1821,9 @@ class GUI:
     def quit_app(self):
         if self.closing: return
         self.closing = True
+        usage_cancel = getattr(self, 'usage_cancel', None)
+        if usage_cancel is not None:
+            usage_cancel.set()
         cancelled = getattr(self, 'navigation_cancel', None)
         if cancelled is not None:
             cancelled.set()
