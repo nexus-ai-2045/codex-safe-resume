@@ -163,7 +163,7 @@ class PlanDisplay(unittest.TestCase):
             actual = app.read_usage_status({'mode': 'prepared'})
         self.assertEqual(actual['desktop_connection'], 'read')
         self.assertTrue(bridge.call_args.kwargs['transport_only'])
-        read.assert_called_once_with('fixture', peer_reply=probe.quota.return_value)
+        read.assert_called_once_with('fixture', peer_reply=probe.quota.return_value, cancel=None)
         probe.prepare_thread.assert_not_called()
         probe.send_once.assert_not_called()
         monitor.assert_not_called()
@@ -176,7 +176,7 @@ class PlanDisplay(unittest.TestCase):
         self.assertEqual(actual['desktop_connection'], 'unavailable')
         self.assertEqual(actual['plan_type'], 'pro')
         self.assertNotIn('private-path', json.dumps(actual))
-        read.assert_called_once_with('fixture', peer_reply=None)
+        read.assert_called_once_with('fixture', peer_reply=None, cancel=None)
 
     def test_changed_cli_is_rejected_before_either_connection(self):
         with patch('app.validate_executable', side_effect=ValueError), \

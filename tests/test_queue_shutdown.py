@@ -1,5 +1,6 @@
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest.mock import Mock, patch
@@ -73,9 +74,12 @@ class QueueShutdownTests(unittest.TestCase):
         monitor.is_alive.return_value = True
         usage.is_alive.return_value = True
         self.gui.monitor_thread, self.gui.usage_thread = monitor, usage
+        self.gui.usage_cancel = threading.Event()
         with patch('app.reconcile_pending_shutdown', return_value=True) as cleanup:
             self.gui.quit_app()
             cleanup.assert_not_called()
+            self.assertTrue(self.gui.usage_cancel.is_set())
+            self.gui.root.destroy.assert_not_called()
             monitor.is_alive.return_value = False
             self.gui.finish_quit()
             cleanup.assert_not_called()

@@ -33,6 +33,38 @@ class UsageUi(unittest.TestCase):
         self.gui.usage_status = Mock()
         self.gui.connection_note = Mock()
 
+    def test_each_display_request_owns_a_fresh_cancel_event(self):
+        events = []
+        def read(config, *, cancel):
+            events.append(cancel)
+            return sample()
+        with patch('app.read_usage_status', side_effect=read):
+            self.gui.request_usage()
+            self.gui.usage_thread.join(1)
+            self.gui.usage_cancel.set()
+            self.gui.drain_usage()
+            self.gui.request_usage()
+            self.gui.usage_thread.join(1)
+        self.assertEqual(len(events), 2)
+        self.assertIsNot(events[0], events[1])
+        self.assertTrue(events[0].is_set())
+        self.assertFalse(events[1].is_set())
+
+    def test_cancel_after_peer_read_does_not_verify_or_spawn_display_cli(self):
+        cancel = threading.Event()
+        bridge = Mock()
+        bridge.__enter__ = Mock(return_value=bridge)
+        bridge.__exit__ = Mock(return_value=False)
+        bridge.quota.side_effect = lambda: cancel.set()
+        with patch('app.validate_executable'), \
+                patch('app.DesktopBridge', return_value=bridge), \
+                patch('app.usage_executable') as resolve, patch('app.read_limits') as read:
+            with self.assertRaises(app.UsageReadError):
+                app.read_usage_status({'mode': 'prepared'}, cancel=cancel)
+        resolve.assert_not_called()
+        read.assert_not_called()
+        bridge.__exit__.assert_called_once()
+
     def test_weekly_primary_is_never_displayed_as_five_hours(self):
         text = app.usage_text(sample())
         self.assertIn('1週間枠: 制限あり・残り75%', text)
@@ -85,7 +117,7 @@ class UsageUi(unittest.TestCase):
     def test_only_one_usage_request_runs_at_a_time(self):
         release = threading.Event()
         self.addCleanup(release.set)
-        def read(_):
+        def read(_, **kwargs):
             release.wait(1)
             return sample()
         with patch('app.usage_executable', return_value='fixture'), patch('app.read_limits', side_effect=read) as reader:
@@ -195,7 +227,7 @@ class UsageUi(unittest.TestCase):
             actual = app.read_usage_status(config)
         verify.assert_called_once()
         peer.assert_not_called()
-        read.assert_called_once_with(Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'), peer_reply=None)
+        read.assert_called_once_with(Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'), peer_reply=None, cancel=None)
         self.assertEqual(actual['desktop_connection'], 'unavailable')
         self.assertIsNone(actual['account_match'])
         self.assertIn('自動送信: 停止', app.connection_text(config, actual))
