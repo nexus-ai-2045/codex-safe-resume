@@ -659,6 +659,17 @@ class TrayControls(unittest.TestCase):
         self.assertFalse(gui.tray_available)
         gui.root.withdraw.assert_not_called()
 
+    def test_mac_notch_overlap_keeps_window_and_explains_placement(self):
+        gui, icon = self.gui(), FakeIcon()
+        self.start(gui, icon, 'darwin')
+        with patch('app.mac_tray_snapshot', return_value={'status': 'obscured'}):
+            gui.check_tray_ready(remaining=0)
+            gui.on_close()
+        self.assertFalse(gui.tray_available)
+        gui.root.withdraw.assert_not_called()
+        self.assertIn('ノッチ', gui.tray_state.set.call_args.args[0])
+        self.assertIn('配置', gui.tray_state.set.call_args.args[0])
+
     def test_mac_native_placement_is_rechecked_and_can_become_ready(self):
         gui, icon = self.gui(), FakeIcon()
         self.start(gui, icon, 'darwin')
@@ -666,6 +677,8 @@ class TrayControls(unittest.TestCase):
         with patch('app.mac_tray_snapshot', return_value={'status': 'unplaced'}):
             gui.check_tray_ready(remaining=0)
         gui.root.deiconify.assert_called_once()
+        gui.root.focus_force.assert_not_called()
+        gui.root.lift.assert_not_called()
         self.assertFalse(gui.tray_available)
         self.assertIs(gui.tray, icon)
         self.assertFalse(icon.stopped)

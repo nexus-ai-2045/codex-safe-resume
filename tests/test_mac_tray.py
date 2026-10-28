@@ -16,12 +16,16 @@ class MacTraySnapshot(unittest.TestCase):
     def setUp(self):
         self.screen = Mock()
         self.screen.frame.return_value = rect(0, 0, 1440, 900)
+        self.screen.safeAreaInsets.return_value = SimpleNamespace(top=32)
+        self.screen.auxiliaryTopLeftArea.return_value = rect(0, 868, 680, 32)
+        self.screen.auxiliaryTopRightArea.return_value = rect(760, 868, 680, 32)
         self.window = Mock()
         self.window.isVisible.return_value = True
         self.window.screen.return_value = self.screen
         self.window.convertRectToScreen_.return_value = rect(1000, 878, 24, 22)
         self.button = Mock()
         self.button.isHidden.return_value = False
+        self.button.bounds.return_value = rect(0, 0, 24, 22)
         self.button.window.return_value = self.window
         self.button.image.return_value.size.return_value = SimpleNamespace(width=22, height=22)
         self.item = Mock()
@@ -43,6 +47,7 @@ class MacTraySnapshot(unittest.TestCase):
             'status': 'presented', 'native_visible': True, 'button_hidden': False,
             'image_valid': True, 'window_exists': True, 'window_visible': True,
             'screen_intersection': True, 'menubar_intersection': True,
+            'button_intersects_cutout_gap': False,
         })
         self.assertEqual(json.loads(json.dumps(result)), result)
 
@@ -118,3 +123,42 @@ class MacTraySnapshot(unittest.TestCase):
         self.screen.frame.return_value = rect(-1600, -200, 1600, 1000)
         self.window.convertRectToScreen_.return_value = rect(-400, 778, 24, 22)
         self.assertEqual(mac_tray.snapshot(self.icon)['status'], 'presented')
+
+    def test_native_visible_button_inside_cutout_is_obscured(self):
+        self.window.convertRectToScreen_.return_value = rect(700, 878, 24, 22)
+        result = mac_tray.snapshot(self.icon)
+        self.assertTrue(result['native_visible'])
+        self.assertTrue(result['button_intersects_cutout_gap'])
+        self.assertEqual(result['status'], 'obscured')
+
+    def test_offscreen_button_remains_unplaced(self):
+        self.window.convertRectToScreen_.return_value = rect(700, 950, 24, 22)
+        result = mac_tray.snapshot(self.icon)
+        self.assertFalse(result['button_intersects_cutout_gap'])
+        self.assertEqual(result['status'], 'unplaced')
+
+    def test_absent_or_failed_cutout_api_preserves_base_status(self):
+        for method in ('safeAreaInsets', 'auxiliaryTopLeftArea', 'auxiliaryTopRightArea'):
+            with self.subTest(method=method):
+                getter = getattr(self.screen, method)
+                getter.side_effect = AttributeError('unavailable private details')
+                result = mac_tray.snapshot(self.icon)
+                self.assertEqual(result['status'], 'presented')
+                self.assertIsNone(result['button_intersects_cutout_gap'])
+                self.assertNotIn('private', json.dumps(result))
+                getter.side_effect = None
+        del self.screen.safeAreaInsets
+        self.assertIsNone(mac_tray.snapshot(self.icon)['button_intersects_cutout_gap'])
+
+    def test_screen_without_cutout_preserves_base_status(self):
+        self.screen.safeAreaInsets.return_value.top = 0
+        self.screen.auxiliaryTopRightArea.return_value = rect(0, 0, 0, 0)
+        result = mac_tray.snapshot(self.icon)
+        self.assertEqual(result['status'], 'presented')
+        self.assertFalse(result['button_intersects_cutout_gap'])
+
+    def test_empty_auxiliary_area_is_unknown_not_obscured(self):
+        self.screen.auxiliaryTopRightArea.return_value = rect(0, 0, 0, 0)
+        result = mac_tray.snapshot(self.icon)
+        self.assertEqual(result['status'], 'presented')
+        self.assertIsNone(result['button_intersects_cutout_gap'])

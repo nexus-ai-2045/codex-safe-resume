@@ -1787,8 +1787,12 @@ class GUI:
                 if native['status'] != 'presented':
                     self.tray_available = False
                     if self.root.state() in ('withdrawn', 'iconic'):
-                        self.show_window()
-                    self.tray_state.set('メニューバー：表示位置を確認中（画面は表示したままです）')
+                        self.root.deiconify()
+                        self.sync_tray_window()
+                    if native['status'] == 'obscured':
+                        self.tray_state.set('メニューバー：ノッチに隠れています。アイコンの配置を調整してください（画面は残します）')
+                    else:
+                        self.tray_state.set('メニューバー：表示位置を確認中（画面は表示したままです）')
                     self.root.after(100 if remaining else 5000,
                                     lambda: self.check_tray_ready(max(0, remaining - 1)))
                     return
