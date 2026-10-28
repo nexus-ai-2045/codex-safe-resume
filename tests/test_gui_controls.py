@@ -637,7 +637,8 @@ class TrayControls(unittest.TestCase):
         self.addCleanup(stop_fixture)
         pystray = SimpleNamespace(Menu=Mock(), MenuItem=Mock(), Icon=Mock(return_value=icon))
         with patch('app.sys.platform', platform), patch('app.tray_dependencies', return_value=(pystray, Mock(), Mock())), \
-                patch('app.create_tray_image'):
+                patch('app.create_tray_image'), \
+                patch('app.mac_tray_snapshot', return_value={'status': 'presented'}):
             gui.start_tray()
         return pystray
 
@@ -648,6 +649,31 @@ class TrayControls(unittest.TestCase):
         self.assertEqual(icon.setter_threads, [threading.get_ident()])
         self.assertTrue(gui.tray_available)
         self.assertIn('メニューバー', gui.tray_state.set.call_args.args[0])
+
+    def test_mac_registered_but_unplaced_is_not_available_or_hidden(self):
+        gui, icon = self.gui(), FakeIcon()
+        self.start(gui, icon, 'darwin')
+        with patch('app.mac_tray_snapshot', return_value={'status': 'unplaced'}):
+            gui.check_tray_ready()
+            gui.on_close()
+        self.assertFalse(gui.tray_available)
+        gui.root.withdraw.assert_not_called()
+
+    def test_mac_native_placement_is_rechecked_and_can_become_ready(self):
+        gui, icon = self.gui(), FakeIcon()
+        self.start(gui, icon, 'darwin')
+        gui.root.state.return_value = 'withdrawn'
+        with patch('app.mac_tray_snapshot', return_value={'status': 'unplaced'}):
+            gui.check_tray_ready(remaining=0)
+        gui.root.deiconify.assert_called_once()
+        self.assertFalse(gui.tray_available)
+        self.assertIs(gui.tray, icon)
+        self.assertFalse(icon.stopped)
+        self.assertEqual(gui.root.after.call_args.args[0], 5000)
+        with patch('app.mac_tray_snapshot', return_value={'status': 'presented'}):
+            gui.check_tray_ready()
+        self.assertTrue(gui.tray_available)
+        self.assertEqual(gui.root.after.call_args.args[0], 5000)
 
     def test_windows_waits_for_backend_visibility_without_setting_it_early(self):
         gui, icon = self.gui(), FakeIcon()
@@ -766,7 +792,8 @@ class TrayControls(unittest.TestCase):
         gui.drain_tray_actions()
         gui.root.deiconify.assert_called_once()
 
-    def test_tray_label_and_action_follow_hide_restore_and_minimize(self):
+    @patch('app.mac_tray_snapshot', return_value={'status': 'presented'})
+    def test_tray_label_and_action_follow_hide_restore_and_minimize(self, native):
         gui, icon = self.gui(), FakeIcon()
         gui.root.state.return_value = 'normal'
         gui.root.withdraw.side_effect = lambda: setattr(gui.root.state, 'return_value', 'withdrawn')

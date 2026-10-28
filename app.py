@@ -11,6 +11,7 @@ import time
 import re
 from contextlib import closing
 from app_icons import create_tray_image
+from mac_tray import snapshot as mac_tray_snapshot
 from thread_navigation import open_thread as request_chat_open
 try:
     import tkinter as tk
@@ -353,7 +354,7 @@ class GUI:
         self.refresh()
         self.show_window()
         if enable_tray:
-            self.start_tray()
+            self.root.after_idle(self.start_tray)
         self.root.after(30000, self.periodic)
         self.root.after(8000, self.monitor_tick)
         self.root.after(1000, self.drain_monitor)
@@ -1700,6 +1701,7 @@ class GUI:
                 self.root.after(30000, self.periodic)
 
     def start_tray(self):
+        self.tray_is_mac = sys.platform == 'darwin'
         self.tray_actions = queue.SimpleQueue()
         deps = tray_dependencies()
         if not deps:
@@ -1777,13 +1779,26 @@ class GUI:
             if exited is not None and exited.is_set():
                 self.tray_failed()
                 return
+            if getattr(self, 'tray_is_mac', False):
+                native = mac_tray_snapshot(self.tray)
+                if native != getattr(self, 'tray_native_state', None):
+                    self.tray_native_state = native
+                    self.write('常駐の配置診断: ' + json.dumps(native, ensure_ascii=False))
+                if native['status'] != 'presented':
+                    self.tray_available = False
+                    if self.root.state() in ('withdrawn', 'iconic'):
+                        self.show_window()
+                    self.tray_state.set('メニューバー：表示位置を確認中（画面は表示したままです）')
+                    self.root.after(100 if remaining else 5000,
+                                    lambda: self.check_tray_ready(max(0, remaining - 1)))
+                    return
             if self.tray.visible:
                 if not self.tray_available:
                     self.tray_state.set(f'{self.tray_location()}：常駐中（×で画面を隠します）')
                 self.tray_available = True
                 self.tray_pending = False
-                if exited is not None:
-                    self.root.after(1000, self.check_tray_ready)
+                if exited is not None or getattr(self, 'tray_is_mac', False):
+                    self.root.after(5000 if getattr(self, 'tray_is_mac', False) else 1000, self.check_tray_ready)
             elif remaining:
                 self.root.after(100, lambda: self.check_tray_ready(remaining - 1))
             elif exited is not None:
@@ -1845,6 +1860,8 @@ class GUI:
         if self.closing:
             return
         try:
+            if getattr(self, 'tray_is_mac', False) and self.tray is not None:
+                self.tray_available = mac_tray_snapshot(self.tray)['status'] == 'presented'
             exited = getattr(self, 'tray_exited', None)
             visible = (self.tray_available and self.tray is not None and self.tray.visible
                        and (exited is None or not exited.is_set()))

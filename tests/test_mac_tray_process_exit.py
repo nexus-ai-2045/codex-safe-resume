@@ -41,10 +41,6 @@ CHILD = textwrap.dedent('''
     gui.write = lambda message: None
     gui.configure_reopen()
     gui.start_tray()
-    assert gui.tray_available and gui.tray.visible
-    print(json.dumps({'stage': 'real_tray_ready', 'policy_enabled': auto_watch.status(gui.db)['enabled'],
-                      'tk': str(root.tk.call('info', 'patchlevel')), 'python': sys.version.split()[0]}), flush=True)
-
     def request_exit():
         if route == 'tray':
             # The dependency is hash-pinned. Exercise its real NSMenu action
@@ -55,8 +51,24 @@ CHILD = textwrap.dedent('''
             root.tk.call('tk::mac::Quit')
         print(json.dumps({'stage': 'exit_requested', 'route': route}), flush=True)
 
-    root.after(250, request_exit)
+    readiness = []
+    def verify_ready(remaining=50):
+        gui.check_tray_ready()
+        readiness.append(gui.tray_available and gui.tray.visible
+                         and gui.tray_native_state['status'] == 'presented')
+        if not readiness[-1]:
+            if remaining:
+                root.after(100, lambda: verify_ready(remaining - 1))
+            else:
+                gui.quit_app()
+            return
+        print(json.dumps({'stage': 'real_tray_ready', 'policy_enabled': auto_watch.status(gui.db)['enabled'],
+                          'tk': str(root.tk.call('info', 'patchlevel')), 'python': sys.version.split()[0]}), flush=True)
+        root.after(250, request_exit)
+
+    root.after(1000, verify_ready)
     gui.run()
+    assert readiness and readiness[-1], 'native tray placement was not ready'
     print(json.dumps({'stage': 'mainloop_returned', 'closing': gui.closing}), flush=True)
 ''')
 
