@@ -43,25 +43,43 @@ jobs:
           PY_PYTHON: '3.13'
         run: ./packaging/build-windows.ps1
       - name: Windows受入候補の版とハッシュを記録
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python-version == '3.13' && runner.os == 'Windows'
+        if: >-
+          matrix.python-version == '3.13' && runner.os == 'Windows' &&
+          ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
         shell: pwsh
         env:
           PY_PYTHON: '3.13'
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           $pythonVersion = py -c 'import sys; assert sys.version_info[:2] == (3, 13); print(sys.version.split()[0])'
           if ($LASTEXITCODE -ne 0) { throw '受入候補のPython版を確認できません' }
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceSha -cne $env:GITHUB_SHA) {
+            throw '実際のcheckoutと実行対象の版が一致しません'
+          }
+          $sourceTree = git rev-parse 'HEAD^{tree}'
+          if ($LASTEXITCODE -ne 0 -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
+            throw '受入候補のソースツリーを確認できません'
+          }
+          if ($env:CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$') { throw '候補の版を確認できません' }
           $archive = 'release/CodexSafeResume-Windows-Portable.zip'
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           [ordered]@{
-            source_sha = $env:GITHUB_SHA
+            source_sha = $sourceSha
+            source_tree = $sourceTree
+            candidate_sha = $env:CANDIDATE_SHA
             archive = 'CodexSafeResume-Windows-Portable.zip'
             sha256 = $hash
             python = $pythonVersion
             purpose = '実機受入候補（未署名・安定版ではありません）'
           } | ConvertTo-Json | Set-Content -LiteralPath 'release/windows-acceptance.json' -Encoding utf8NoBOM
       - name: Windows受入候補を保存（安定版リリースではありません）
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python-version == '3.13' && runner.os == 'Windows'
+        if: >-
+          matrix.python-version == '3.13' && runner.os == 'Windows' &&
+          ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: CodexSafeResume-Windows-${{ github.sha }}
