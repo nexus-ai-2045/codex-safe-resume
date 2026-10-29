@@ -434,6 +434,37 @@ class DesktopStdioTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason, 'stdout_write')
         self.assertEqual(raw.fileno(), -1)
 
+    def test_output_failure_reason_survives_sender_cleanup_error(self):
+        for reason in ('websocket_frame', 'stdout_write'):
+            with self.subTest(reason=reason):
+                class Raw:
+                    def close(self):
+                        pass
+                class WS:
+                    def connect(self, *args, **kwargs):
+                        pass
+                    def settimeout(self, value):
+                        pass
+                    def recv_data(self):
+                        payload = b'[]' if reason == 'websocket_frame' else b'{}'
+                        return websocket.ABNF.OPCODE_TEXT, payload
+                    def abort(self):
+                        raise OSError(10057, 'private-cleanup-detail')
+                class ZeroWriter(io.BytesIO):
+                    def write(self, value):
+                        return 0
+                def wait_for_stop(reader, size, stopped):
+                    if not stopped.wait(1):
+                        raise AssertionError('output did not stop')
+                    return None
+                with patch('desktop_stdio.NativeProxySocket', return_value=Raw()), patch(
+                        'desktop_stdio._BoundedWebSocket', return_value=WS()), patch(
+                        'desktop_stdio._InputReader.read', new=wait_for_stop):
+                    with self.assertRaises(DesktopStdioError) as caught:
+                        relay('/fixture/private-path', stdin=io.BytesIO(), stdout=ZeroWriter())
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertNotIn('private', str(caught.exception))
+
     def test_input_failure_reason_survives_websocket_abort_error(self):
         aborted = threading.Event()
         receiving = threading.Event()
