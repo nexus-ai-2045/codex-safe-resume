@@ -67,14 +67,57 @@ def monitor_lease(db):
     """同じ状態DBを監視するプロセス間の排他。期限切れで送信権を復活させない。"""
     database = db.execute('PRAGMA database_list').fetchone()[2]
     lock_path = pathlib.Path(database).parent / 'monitor.lock'
+    with _file_lease(lock_path) as acquired:
+        yield acquired
+
+
+@contextlib.contextmanager
+def gui_lease(home=None):
+    """GUI初期化より前から終了まで、同じ保存先の起動を排他する。"""
+    folder = _state_path(home).resolve()
+    if not folder.name:
+        raise RuntimeError('状態フォルダーを確認してください')
+    folder.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent = folder.parent.stat()
+    if os.name == 'posix' and (parent.st_uid != os.getuid() or parent.st_mode & 0o022):
+        raise RuntimeError('状態フォルダーの親の所有者または権限を確認してください')
+    lock_path = folder.with_name(folder.name + '.gui.lock')
+    with _file_lease(lock_path, gui=True) as acquired:
+        if acquired:
+            # 削除側と同じsibling lockを得てから保存先を作成・再検証する。
+            reject_links(folder)
+            current = folder.parent.stat()
+            if (current.st_dev, current.st_ino) != (parent.st_dev, parent.st_ino):
+                raise RuntimeError('保存先の親の変更を検出しました')
+            safe_state_dir(folder)
+        yield acquired
+
+
+@contextlib.contextmanager
+def _file_lease(lock_path, *, gui=False):
+    """既存の安全検査とOSロックを共有。ロックファイルは削除しない。"""
     reject_links(lock_path)
     flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-    fd = os.open(lock_path, flags, 0o600)
+    try:
+        if gui and os.name == 'nt':
+            from windows_platform import open_gui_lock
+            fd = open_gui_lock(lock_path)
+        else:
+            fd = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        # Windowsの削除側はFileShare.Noneで同じ制御ファイルを保持する。
+        # 取得段階だけをbusyとし、呼出元の例外を捕捉しない。
+        if gui and os.name == 'nt' and getattr(error, 'winerror', None) in (32, 33):
+            yield False
+            return
+        raise
     acquired = False
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise RuntimeError('監視ロックが不正です')
+        if gui and info.st_size > 1:
+            raise RuntimeError('起動ロックが不正です')
         if os.name == 'posix':
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise RuntimeError('監視ロックの権限を確認してください')
@@ -94,6 +137,11 @@ def monitor_lease(db):
                 acquired = True
             except OSError:
                 pass
+        if gui:
+            reject_links(lock_path)
+            current = lock_path.lstat()
+            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise RuntimeError('起動ロックの変更を検出しました')
         yield acquired
     finally:
         if acquired and os.name != 'posix':
@@ -154,9 +202,14 @@ def check_id(s):
     return str(uuid.UUID(s))
 
 
-def safe_state_dir(home=None, *, create=True):
+def _state_path(home=None):
     p = pathlib.Path(home or os.environ.get('CODEX_RESUME_HOME', pathlib.Path.home()/'.codex-safe-resume')).expanduser()
     reject_links(p)
+    return p
+
+
+def safe_state_dir(home=None, *, create=True):
+    p = _state_path(home)
     if create:
         p.mkdir(parents=True, exist_ok=True, mode=0o700)
     elif not p.is_dir():

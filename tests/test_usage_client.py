@@ -46,6 +46,60 @@ class UsageClientTests(unittest.TestCase):
             value = usage_client.read_limits('/fixture/codex', timeout=timeout, peer_reply=peer_reply)
         return value, process, spawn
 
+    def test_cancelled_read_does_not_spawn_or_validate(self):
+        cancel = threading.Event()
+        cancel.set()
+        with patch('usage_client.subprocess.Popen') as spawn, \
+                patch('usage_client.validate_location') as validate:
+            with self.assertRaises(usage_client.UsageReadError):
+                usage_client.read_limits('/fixture/codex', cancel=cancel)
+        spawn.assert_not_called()
+        validate.assert_not_called()
+
+    def test_cancel_during_blocked_rpc_reaps_owned_child_and_reader(self):
+        real_spawn = subprocess.Popen
+        cancel = threading.Event()
+        waiting = threading.Event()
+        owned = []
+        errors = []
+        real_response = usage_client._response
+        def response(*args, **kwargs):
+            waiting.set()
+            return real_response(*args, **kwargs)
+        def spawn(*args, **kwargs):
+            process = real_spawn([sys.executable, '-u', '-c',
+                                  'import time; time.sleep(30)'], **kwargs)
+            owned.append(process)
+            return process
+        def read():
+            try:
+                usage_client.read_limits('/fixture/codex', timeout=8, cancel=cancel)
+            except Exception as error:
+                errors.append(error)
+        with patch('usage_client.validate_location', return_value=Path('/fixture/codex')), \
+                patch('usage_client.subprocess.Popen', side_effect=spawn), \
+                patch('usage_client._response', side_effect=response):
+            worker = threading.Thread(target=read)
+            worker.start()
+            try:
+                self.assertTrue(waiting.wait(2))
+                cancel.set()
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+            finally:
+                cancel.set()
+                for process in owned:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=2)
+                worker.join(2)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], usage_client.UsageReadError)
+        self.assertIsNotNone(owned[0].poll())
+        self.assertTrue(owned[0].stdin.closed)
+        self.assertTrue(owned[0].stdout.closed)
+        self.assertFalse(any(t.name == 'usage-limits-reader' for t in threading.enumerate()))
+
     def test_null_multi_bucket_uses_valid_legacy_codex_snapshot(self):
         result = reply(rateLimitsByLimitId=None)
         value, _, _ = self.read(result=result)

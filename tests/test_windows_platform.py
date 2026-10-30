@@ -63,6 +63,83 @@ Microsoft.PowerShell.Security\Set-Acl -LiteralPath $env:CSR_TEST_SOCKET -AclObje
         winsock.WSACleanup()
 
 
+class GuiLockNativeOpenTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        kernel = SimpleNamespace(CreateFileW=Mock(return_value=71), CloseHandle=Mock())
+        info = SimpleNamespace(attributes=0, links=1, size_high=0, size_low=0)
+        tag = SimpleNamespace(attributes=0, tag=0)
+        crt = SimpleNamespace(open_osfhandle=Mock(return_value=19))
+        with patch.object(platform, '_require_windows'), \
+                patch.object(platform, 'reject_links'), \
+                patch.object(platform, '_native', return_value=(kernel, None, None)), \
+                patch.object(platform, '_file_info', return_value=(info, tag)), \
+                patch.object(platform, 'os', SimpleNamespace(O_RDWR=2, O_BINARY=8, O_NOINHERIT=128)), \
+                patch.dict(sys.modules, msvcrt=crt):
+            yield kernel, info, tag, crt
+
+    def test_native_open_preserves_exact_error_before_other_calls(self):
+        for number in (32, 33, 5, 12345):
+            error = OSError('isolated native open error')
+            error.winerror = number
+            for invalid in (None, 0, ctypes.c_void_p(-1).value):
+                with self.subTest(number=number, invalid=invalid), self.fixture() as (kernel, _, _, crt):
+                    kernel.CreateFileW.return_value = invalid
+                    with patch.object(platform.ctypes, 'get_last_error', return_value=number, create=True) as last, \
+                            patch.object(platform.ctypes, 'WinError', return_value=error, create=True) as winerror:
+                        with self.assertRaises(OSError) as caught:
+                            platform.open_gui_lock(Path('fixture.gui.lock'))
+                    self.assertIs(caught.exception, error)
+                    last.assert_called_once_with()
+                    winerror.assert_called_once_with(number)
+                    crt.open_osfhandle.assert_not_called()
+                    kernel.CloseHandle.assert_not_called()
+
+    def test_valid_handle_transfers_ownership_to_noninheritable_crt_fd(self):
+        with self.fixture() as (kernel, _, _, crt):
+            flags = SimpleNamespace(O_RDWR=2, O_BINARY=8, O_NOINHERIT=128)
+            with patch.object(platform, 'os', flags):
+                self.assertEqual(platform.open_gui_lock(Path('fixture.gui.lock')), 19)
+            kernel.CreateFileW.assert_called_once_with('fixture.gui.lock', 0xC0000000, 3, None,
+                                                       4, 0x00200000, None)
+            crt.open_osfhandle.assert_called_once_with(71, 2 | 8 | 128)
+            kernel.CloseHandle.assert_not_called()
+
+    def test_malformed_native_metadata_closes_handle_without_transfer(self):
+        for field, value in (('attributes', 0x400), ('attributes', 0x10), ('links', 0),
+                             ('links', 2), ('size_high', 1), ('size_low', 2)):
+            with self.subTest(field=field, value=value), self.fixture() as (kernel, info, _, crt):
+                setattr(info, field, value)
+                with self.assertRaises((OSError, RuntimeError)):
+                    platform.open_gui_lock(Path('fixture.gui.lock'))
+                kernel.CloseHandle.assert_called_once_with(71)
+                crt.open_osfhandle.assert_not_called()
+        with self.fixture() as (kernel, _, tag, crt):
+            tag.attributes = 0x400
+            with self.assertRaises((OSError, RuntimeError)):
+                platform.open_gui_lock(Path('fixture.gui.lock'))
+            kernel.CloseHandle.assert_called_once_with(71)
+            crt.open_osfhandle.assert_not_called()
+
+    def test_metadata_query_failure_closes_owned_handle(self):
+        with self.fixture() as (kernel, _, _, crt), \
+                patch.object(platform, '_file_info', side_effect=ValueError('isolated query failure')):
+            with self.assertRaises(RuntimeError):
+                platform.open_gui_lock(Path('fixture.gui.lock'))
+            kernel.CloseHandle.assert_called_once_with(71)
+            crt.open_osfhandle.assert_not_called()
+
+    def test_conversion_error_cannot_be_mistaken_for_open_contention(self):
+        error = OSError('isolated conversion error')
+        error.winerror = 32
+        with self.fixture() as (kernel, _, _, crt):
+            crt.open_osfhandle.side_effect = error
+            with self.assertRaises(RuntimeError) as caught:
+                platform.open_gui_lock(Path('fixture.gui.lock'))
+            self.assertIs(caught.exception.__cause__, error)
+            kernel.CloseHandle.assert_called_once_with(71)
+
+
 class PlatformContractTests(unittest.TestCase):
     def test_invalid_pid_is_sanitized(self):
         for pid in (None, True, '1', 0, -1, 2 ** 40):

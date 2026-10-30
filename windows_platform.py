@@ -228,6 +228,35 @@ def _file_identity(info):
                 epoch=(info.creation.dwHighDateTime << 32) | info.creation.dwLowDateTime)
 
 
+def open_gui_lock(path):
+    """GUI制御ファイルを開き、元のWindows取得エラーをCRT変換前に保持する。"""
+    _require_windows()
+    import msvcrt
+    reject_links(path)
+    kernel = _native()[0]
+    handle = kernel.CreateFileW(str(path), 0xC0000000, 3, None, 4, 0x00200000, None)
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
+        # 他のnative APIを呼ぶ前に取得する。errno=13だけからbusyを推測しない。
+        error = ctypes.get_last_error()
+        raise ctypes.WinError(error)
+    owned = True
+    try:
+        info, tag = _file_info(handle)
+        if ((info.attributes | tag.attributes) & 0x410 or info.links != 1
+                or info.size_high != 0 or info.size_low > 1):
+            raise RuntimeError('起動ロックのリンクまたは種類を確認できません')
+        flags = os.O_RDWR | os.O_BINARY | os.O_NOINHERIT
+        fd = msvcrt.open_osfhandle(handle, flags)
+        owned = False  # 以降のCloseHandleは返却fdのos.closeだけが担当する。
+        return fd
+    except (OSError, ValueError) as error:
+        # 検査・移譲の失敗を、CreateFileWの共有違反と混同しない。
+        raise RuntimeError('起動ロックの検査またはハンドル移譲に失敗しました') from error
+    finally:
+        if owned:
+            kernel.CloseHandle(handle)
+
+
 def endpoint_identity(path):
     try:
         _require_windows()

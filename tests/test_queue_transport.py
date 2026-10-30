@@ -202,6 +202,50 @@ class QueueTransportTests(unittest.TestCase):
             self.assertEqual([item['method'] for item in sent], ['initialize', 'initialized'])
             self.assertEqual(spawn.call_count, 1)
 
+    def test_enqueue_safety_check_has_its_own_time_before_submission(self):
+        for allowed in (True, False):
+            with self.subTest(allowed=allowed):
+                clock = [100.0]
+
+                def guard():
+                    clock[0] += self.transport.timeout + 1
+                    return allowed
+
+                with patch('queue_transport.time.monotonic', side_effect=lambda: clock[0]):
+                    value, process, spawn = self.enqueue(guard=guard)
+                self.assertEqual(value, {'outcome': 'accepted', 'queue_id': QUEUE}
+                                 if allowed else {'outcome': 'not_started'})
+                sent = [json.loads(line) for line in process.stdin.captured.splitlines()]
+                self.assertEqual([item['method'] for item in sent],
+                                 ['initialize', 'initialized', 'thread/queue/add']
+                                 if allowed else ['initialize', 'initialized'])
+                self.assertEqual(spawn.call_count, 1)
+
+    def test_enqueue_response_after_slow_guard_is_still_bounded(self):
+        clock = [100.0]
+        response = queue_transport._response
+
+        def guard():
+            clock[0] += self.transport.timeout + 1
+            return True
+
+        def expired_response(incoming, failed, request_id, deadline):
+            if request_id == 2:
+                clock[0] += self.transport.timeout + 1
+            return response(incoming, failed, request_id, deadline)
+
+        with patch('queue_transport.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('queue_transport._response', side_effect=expired_response):
+            value, process, spawn = self.enqueue(guard=guard)
+        self.assertEqual(value, {'outcome': 'unknown'})
+        sent = [json.loads(line) for line in process.stdin.captured.splitlines()]
+        self.assertEqual([item['method'] for item in sent],
+                         ['initialize', 'initialized', 'thread/queue/add'])
+        self.assertEqual(spawn.call_count, 1)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stdin.closed)
+        self.assertFalse(self.transport._owned)
+
     def test_enqueue_bad_reply_is_unknown_never_retried(self):
         for submission in ({'id': 'bad'}, {'id': QUEUE, 'threadId': OTHER},
                            {'id': QUEUE, 'clientUserMessageId': OTHER}):

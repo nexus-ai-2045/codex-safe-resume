@@ -79,18 +79,39 @@ def _security(path):
     raise ValueError(_ERROR)
 
 
-def _metadata(info):
+def _windows_attributes(path):
+    try:
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        query = kernel.GetFileAttributesW
+        query.argtypes = [wintypes.LPCWSTR]
+        query.restype = wintypes.DWORD
+        attributes = query(str(path))
+    except (OSError, AttributeError, TypeError, ValueError):
+        raise ValueError(_ERROR) from None
+    if (type(attributes) is not int or not 0 <= attributes < 0xffffffff
+            or attributes & 0x400):
+        raise ValueError(_ERROR)
+    return attributes
+
+
+def _metadata(info, *, path=None):
     mode = info.st_mode & ~0o111 if os.name == 'nt' else info.st_mode
     links = None if stat.S_ISDIR(info.st_mode) else info.st_nlink
+    raw_attributes = getattr(info, 'st_file_attributes', 0)
+    if sys.platform == 'win32' and raw_attributes & 0x400:
+        raise ValueError(_ERROR)
+    # lstat may expose enumeration-only Windows attributes; use the Win32 view.
+    attributes = (_windows_attributes(path) if sys.platform == 'win32' and path is not None
+                  else raw_attributes)
     return (info.st_dev, info.st_ino, mode, links,
-            info.st_uid, info.st_gid, getattr(info, 'st_file_attributes', 0))
+            info.st_uid, info.st_gid, attributes)
 
 
 def _snapshot(path, *, sealed_root=None):
     info = path.lstat()
-    base = _metadata(info)
     if getattr(info, 'st_file_attributes', 0) & 0x400:
         raise ValueError(_ERROR)
+    base = _metadata(info, path=path)
     if stat.S_ISLNK(info.st_mode):
         if sealed_root is None or not path.resolve(strict=True).is_relative_to(sealed_root):
             raise ValueError(_ERROR)
@@ -115,7 +136,7 @@ def _snapshot(path, *, sealed_root=None):
     else:
         raise ValueError(_ERROR)
     permissions = _security(path)
-    if _metadata(path.lstat()) != base:
+    if _metadata(path.lstat(), path=path) != base:
         raise ValueError(_ERROR)
     return base, content, permissions
 

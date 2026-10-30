@@ -189,39 +189,43 @@ def _windows_cli(desktop, server, chain):
     return str(validate_location(stage_cli(root, server['executable'])))
 
 
-def _darwin_cli(desktop, server, chain, team):
-    from desktop_binding import desktop_bundle
-    from queue_resource_seal import ResourceSeal
+def verify_darwin_cli_files(bundle: str | Path, targets: list[Path] | tuple[Path, ...],
+                            team: str) -> Path:
+    """公式bundle内のCLIだけを検証し、Desktopのプロセス対応は判定しない。"""
+    from queue_attestation import capture, matches
+    from queue_resource_seal import ResourceSeal, _read
     if team != DARWIN_TEAM:
         raise ValueError(_ERROR)
-    executable = Path(desktop['executable'])
-    if (not executable.is_absolute() or '..' in executable.parts
-            or executable.parent.name != 'MacOS' or executable.parent.parent.name != 'Contents'):
+    bundle = Path(bundle)
+    if (not bundle.is_absolute() or '..' in bundle.parts or bundle.suffix != '.app'
+            or not isinstance(targets, (list, tuple)) or not 1 <= len(targets) <= 2):
         raise ValueError(_ERROR)
-    bundle = executable.parent.parent.parent
-    if bundle.suffix != '.app':
-        raise ValueError(_ERROR)
+    reject_links(bundle)
     plist = bundle / 'Contents' / 'Info.plist'
-    reject_links(plist)
-    if plist.stat().st_size > 1048576:
+    plist_proof, raw_plist = _read(plist, 1048576)
+    info = plistlib.loads(raw_plist)
+    name = info.get('CFBundleExecutable') if isinstance(info, dict) else None
+    if (not isinstance(info, dict) or info.get('CFBundleIdentifier') != 'com.openai.codex'
+            or not isinstance(name, str) or not name or name in ('.', '..')
+            or '/' in name or '\\' in name):
         raise ValueError(_ERROR)
-    info = plistlib.loads(plist.read_bytes())
-    if (info.get('CFBundleIdentifier') != 'com.openai.codex'
-            or info.get('CFBundleExecutable') != executable.name
-            or desktop_bundle(desktop['pid']) != info['CFBundleIdentifier']):
-        raise ValueError(_ERROR)
-    requirement = 'anchor apple generic and identifier "com.openai.codex" and certificate leaf[subject.OU] = "' + team + '"'
     contents = bundle / 'Contents'
-    seal = ResourceSeal(contents)
-    for target, constraint in ((bundle, requirement), *( (Path(item['executable']), 'anchor apple generic and certificate leaf[subject.OU] = "' + team + '"') for item in chain[:-1])):
+    executable = contents / 'MacOS' / name
+    targets = [Path(path) for path in targets]
+    for target in targets:
         reject_links(target)
-        if target != bundle:
-            if (not target.is_absolute() or '..' in target.parts
-                    or not target.is_relative_to(contents)
-                    or target.name not in ('codex', 'codex-code-mode-host')
-                    or not target.resolve(strict=True).is_relative_to(contents.resolve(strict=True))):
-                raise ValueError(_ERROR)
-        validate_location(executable if target == bundle else target)
+        if (not target.is_absolute() or '..' in target.parts
+                or not target.is_relative_to(contents)
+                or target.name not in ('codex', 'codex-code-mode-host')
+                or not target.resolve(strict=True).is_relative_to(contents.resolve(strict=True))):
+            raise ValueError(_ERROR)
+    for target in (executable, *targets):
+        validate_location(target)
+    seal = ResourceSeal(contents)
+    # /var等のOS標準aliasを、既存のattestationが扱う実体パスへ揃える。
+    before = capture({path.resolve(strict=True) for path in (executable, plist, seal.path, *targets)})
+    requirement = 'anchor apple generic and identifier "com.openai.codex" and certificate leaf[subject.OU] = "' + team + '"'
+    for target, constraint in ((bundle, requirement), *((path, 'anchor apple generic and certificate leaf[subject.OU] = "' + team + '"') for path in targets)):
         if target != bundle and seal.resource(target):
             continue
         arguments = ['/usr/bin/codesign', '--verify', '--strict', '-R', '=' + constraint, str(target)]
@@ -229,10 +233,29 @@ def _darwin_cli(desktop, server, chain, team):
             arguments.append('--deep')
         result = subprocess.run(arguments,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                timeout=10, check=False)
+                                timeout=30, check=False)
         if result.returncode != 0:
             raise ValueError(_ERROR)
-    if not seal.unchanged():
+    if (not seal.unchanged() or _read(plist, 1048576) != (plist_proof, raw_plist)
+            or not matches(before)):
+        raise ValueError(_ERROR)
+    for target in (executable, *targets):
+        validate_location(target)
+    return executable
+
+
+def _darwin_cli(desktop, server, chain, team):
+    from desktop_binding import desktop_bundle
+    if team != DARWIN_TEAM:
+        raise ValueError(_ERROR)
+    executable = Path(desktop['executable'])
+    if (not executable.is_absolute() or '..' in executable.parts
+            or executable.parent.name != 'MacOS' or executable.parent.parent.name != 'Contents'
+            or desktop_bundle(desktop['pid']) != 'com.openai.codex'):
+        raise ValueError(_ERROR)
+    bundle = executable.parent.parent.parent
+    targets = [Path(item['executable']) for item in chain[:-1]]
+    if verify_darwin_cli_files(bundle, targets, team) != executable:
         raise ValueError(_ERROR)
     return str(validate_location(Path(server['executable'])))
 
@@ -400,6 +423,19 @@ def _server_role(server):
     raise ValueError(_ERROR)
 
 
+def _darwin_desktop_parent(desktop):
+    from desktop_binding import desktop_bundle
+    path = Path(desktop['executable'])
+    if path.parent.name != 'MacOS' or path.parent.parent.name != 'Contents':
+        return False
+    identifier = desktop_bundle(desktop['pid'])
+    if (type(identifier) is not str or len(identifier) > 255
+            or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9-]*)+', identifier) is None
+            or _identity(desktop['pid']) != desktop):
+        raise ValueError(_ERROR)
+    return identifier == 'com.openai.codex'
+
+
 def _backend_holder(users, known_server=None):
     found = []
     names = {'codex.exe', 'codex-code-mode-host.exe'} if _platform() == 'win32' else {'codex', 'codex-code-mode-host'}
@@ -414,7 +450,7 @@ def _backend_holder(users, known_server=None):
                 if _platform() == 'win32':
                     desktop_parent = path.name.casefold() == 'chatgpt.exe'
                 else:
-                    desktop_parent = path.parent.name == 'MacOS' and path.parent.parent.name == 'Contents'
+                    desktop_parent = _darwin_desktop_parent(desktop)
                 if desktop_parent and (server == known_server or _server_role(server) == 'app-server'):
                     found.append(identity)
         except _WindowsProcessExited:

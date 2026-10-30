@@ -406,6 +406,7 @@ def relay(executable, codex_home=None, stdin=None, stdout=None, timeout=8, recei
         if not input_started and not cleanup_failed:
             raise RelayPreparationError('標準入力を読む前に共有接続の準備が失敗しました',
                                         reason='relay_preparation') from None
-        reason = input_reason if input_failed.is_set() else failure_reason or 'cleanup'
+        reason = (input_reason if input_failed.is_set() and input_reason != 'cleanup'
+                  else failure_reason or input_reason or 'cleanup')
         raise DesktopStdioError('Desktop中継を継続できません。接続とフレーム形式を確認してください',
                                 reason=reason) from None
