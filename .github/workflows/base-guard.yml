@@ -2,10 +2,12 @@ name: base-guard
 
 # 必須チェック「base-guard」。pull_request_target なので、定義は比較元（保護された側）の版が動く。
 # PR 側のコードは checkout も実行もしない。PR の commit を git の中身として読むだけ。
-# 赤にするもの: 検査を変えるパス（.github/・.githooks/・.repo-preflight/・.gitleaks.toml など）の変更、
+# 保護パスの変更は、base側の登録済み署名者と設計・差分判断の連鎖を検証する。証拠が無ければ停止する。
+# 必須検査・承認入口の変更、呼び出し削除などは差分判断でも免除しない。
+# 赤にするもの: 判断の無い保護パス変更（.github/・.githooks/・.repo-preflight/・.gitleaks.toml など）、
 # preflight-gate の呼び出し先の owner/リポ違い、uses の @ と preflight-ref の不一致、呼び出しの削除、
 # 版のタグ（v*）から辿れない SHA（フォーク網の SHA）。タグは ruleset で保護する（人の GO が要る設定）。
-# 固定先: PREFLIGHT_REF は repo-preflight v0.10.0（preflight.yml と同じ公開版の SHA）。
+# 5f1fde32b05b1b538650e547f0391dfd91d3276f は導入時に repo-preflight の 40桁 SHA に置き換える（preflight-gate と同じ SHA）。
 # ruleset の必須チェック名は「base-guard」。job の name と一致させる。
 
 on:
@@ -14,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   base-guard:
@@ -22,7 +25,7 @@ jobs:
     timeout-minutes: 10
     env:
       PYTHONUTF8: "1"
-      PREFLIGHT_REF: 5b7c774deb8e9abcf0fce0c5f39ec1c1f3a894f3 # v0.10.0
+      PREFLIGHT_REF: 5f1fde32b05b1b538650e547f0391dfd91d3276f
     steps:
       - name: Require pinned repo-preflight SHA
         run: '[[ "$PREFLIGHT_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "PREFLIGHT_REF には 40桁の commit SHA を書いてください" >&2; exit 1; }'
@@ -54,6 +57,7 @@ jobs:
       - name: Install hash-pinned PyYAML
         run: python -m pip install --disable-pip-version-check --no-deps --require-hashes -r tool/requirements-guard.txt
       - name: Fetch PR commit without checking it out
+        id: pr_snapshot
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -63,6 +67,7 @@ jobs:
           set -euo pipefail
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          git check-ref-format "refs/heads/$GITHUB_BASE_REF"
           auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$EVENT_FETCH_TOKEN" | base64 | tr -d '\r\n')"
           unset EVENT_FETCH_TOKEN
           GIT_CONFIG_COUNT=2 \
@@ -71,10 +76,21 @@ jobs:
           GIT_CONFIG_KEY_1=credential.helper \
           GIT_CONFIG_VALUE_1= \
           GIT_TERMINAL_PROMPT=0 \
-            git -C target fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+            git -C target fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head" "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/guard/current-base"
           unset auth_header
           test "$(git -C target rev-parse 'refs/remotes/pr/head^{commit}')" = "$HEAD_SHA"
-      - name: Check base and PR definitions
+          current_base_sha="$(git -C target rev-parse 'refs/remotes/guard/current-base^{commit}')"
+          [[ "$current_base_sha" =~ ^[0-9a-f]{40}$ ]]
+          printf 'base_sha=%s\n' "$current_base_sha" >> "$GITHUB_OUTPUT"
+      - name: 比較元とPRの検査定義・判断を照合
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python tool/scripts/base_guard.py --repo target --base-ref "$BASE_SHA" --head-ref refs/remotes/pr/head --trusted-tool tool
+          BASE_SHA: ${{ steps.pr_snapshot.outputs.base_sha }}
+          TARGET_REPOSITORY_ID: ${{ github.repository_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_PREFLIGHT_CONTEXT_TOKEN: ${{ github.token }}
+        run: >-
+          python tool/scripts/base_guard.py --repo target --base-ref "$BASE_SHA"
+          --head-ref refs/remotes/pr/head --trusted-tool tool
+          --repository "$GITHUB_REPOSITORY" --repository-id "$TARGET_REPOSITORY_ID"
+          --pull-request "$PR_NUMBER" --base-branch "refs/heads/$GITHUB_BASE_REF"
+          --verify-github-context --json
