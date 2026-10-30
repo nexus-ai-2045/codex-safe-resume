@@ -1,3 +1,4 @@
+import contextlib
 import os
 import pathlib
 import plistlib
@@ -581,6 +582,92 @@ class QueueAttestationTests(unittest.TestCase):
         patch = mock.patch.object(self.attestation, '_security', return_value=b'owner-and-acl')
         patch.start()
         self.addCleanup(patch.stop)
+
+    @contextlib.contextmanager
+    def windows_attribute_view(self, *, path_attributes=0x40020):
+        original_lstat = pathlib.Path.lstat
+        original_fstat = os.fstat
+        values = {'file': 0x20, 'directory': 0x10}
+
+        def with_attributes(info, attributes):
+            fields = {name: getattr(info, name) for name in dir(info)
+                      if name.startswith('st_')}
+            return types.SimpleNamespace(**(fields | {'st_file_attributes': attributes}))
+
+        def lstat(path, *args, **kwargs):
+            info = original_lstat(path, *args, **kwargs)
+            if path == self.file:
+                attributes = path_attributes() if callable(path_attributes) else path_attributes
+                return with_attributes(info, attributes)
+            return info
+
+        def attributes(path):
+            value = values['file' if pathlib.Path(path) == self.file else 'directory']
+            return value() if callable(value) else value
+
+        query = mock.Mock(side_effect=attributes)
+        kernel = types.SimpleNamespace(GetFileAttributesW=query)
+        with mock.patch.object(self.attestation.sys, 'platform', 'win32'), mock.patch.object(
+                self.attestation.ctypes, 'WinDLL', return_value=kernel, create=True), mock.patch.object(
+                pathlib.Path, 'lstat', lstat), mock.patch.object(
+                self.attestation.os, 'fstat', side_effect=lambda fd: with_attributes(original_fstat(fd), 0x20)):
+            yield values, query
+
+    def test_windows_enumeration_attributes_do_not_reject_identical_file(self):
+        with self.windows_attribute_view() as (_, query):
+            proof = self.attestation.capture([self.file])
+            self.assertTrue(self.attestation.matches(proof))
+            self.assertEqual(proof['paths'][str(self.file)][0][-1], 0x20)
+            query.assert_any_call(str(self.file))
+
+    def test_windows_attribute_lookup_failure_is_not_replaced_with_lstat(self):
+        for invalid in (0xffffffff, None):
+            with self.subTest(invalid=invalid), self.windows_attribute_view() as (values, query):
+                values['file'] = invalid
+                with self.assertRaises(ValueError):
+                    self.attestation.capture([self.file])
+                query.assert_any_call(str(self.file))
+
+    def test_windows_canonical_directory_reparse_attribute_is_rejected(self):
+        with self.windows_attribute_view() as (values, query):
+            values['directory'] = 0x410
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.root)
+            query.assert_any_call(str(self.root))
+
+    def test_windows_canonical_file_reparse_attribute_is_rejected(self):
+        with self.windows_attribute_view() as (values, query):
+            values['file'] = 0x420
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+            query.assert_any_call(str(self.file))
+
+    def test_windows_attribute_api_exception_has_only_the_fixed_error(self):
+        with self.windows_attribute_view() as (_, query):
+            query.side_effect = OSError('private-source-detail')
+            with self.assertRaises(ValueError) as caught:
+                self.attestation._snapshot(self.file)
+            self.assertEqual(str(caught.exception), self.attestation._ERROR)
+            self.assertIsNone(caught.exception.__cause__)
+
+    def test_windows_raw_reparse_attribute_is_rejected(self):
+        with self.windows_attribute_view(path_attributes=0x420):
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+
+    def test_windows_final_raw_reparse_attribute_is_rejected(self):
+        sequence = iter((0x40020, 0x420))
+        with self.windows_attribute_view(path_attributes=lambda: next(sequence)):
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+
+    def test_windows_canonical_attribute_change_during_read_is_rejected(self):
+        with self.windows_attribute_view() as (values, query):
+            sequence = iter((0x20, 0x21))
+            values['file'] = lambda: next(sequence)
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+            self.assertEqual(query.call_count, 2)
 
     def test_unchanged_attestation_is_read_only(self):
         proof = self.attestation.capture([self.file], exact_directories=[self.root])
