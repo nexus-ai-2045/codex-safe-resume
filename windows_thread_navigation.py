@@ -10,7 +10,10 @@ from windows_package import FAMILY, verify_package
 from windows_platform import process_identity
 
 
-_PACKAGE = 'OpenAI.Codex_26.1021.3705.0_x64__2p2nqsd0c76g0'
+_PACKAGES = frozenset({
+    'OpenAI.Codex_26.1021.3705.0_x64__2p2nqsd0c76g0',
+    'OpenAI.Codex_26.1023.6621.0_x64__2p2nqsd0c76g0',
+})
 _CLASS = 'Chrome_MessageWindow'
 _HWND_MESSAGE = -3
 _WM_COPYDATA = 0x004A
@@ -129,7 +132,7 @@ def _target(home):
     package = verify_package(pid, desktop['executable'])
     root = Path(package['root'])
     executable = Path(desktop['executable'])
-    if (package.get('full_name') != _PACKAGE or package.get('family') != FAMILY
+    if (package.get('full_name') not in _PACKAGES or package.get('family') != FAMILY
             or not root.is_absolute() or '..' in root.parts
             or executable != root / 'app' / 'ChatGPT.exe'
             or package != evidence['attestation']['package']

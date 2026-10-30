@@ -82,7 +82,8 @@ class WindowsThreadNavigation(unittest.TestCase):
         self.package_root = Path(self.directory.name).resolve() / '公式 アプリ'
         self.executable = self.package_root / 'app/ChatGPT.exe'
         self.identity = dict(pid=1234, ppid=1, start=[1, 2], executable=str(self.executable))
-        self.package = dict(root=str(self.package_root), full_name=navigation._PACKAGE,
+        self.package = dict(root=str(self.package_root),
+                            full_name='OpenAI.Codex_26.1021.3705.0_x64__2p2nqsd0c76g0',
                             family=navigation.FAMILY)
         self.evidence = dict(platform='win32', home=str(self.home), desktop=self.identity,
                              attestation=dict(package=dict(self.package)))
@@ -170,9 +171,18 @@ class WindowsThreadNavigation(unittest.TestCase):
                 thread_navigation.open_thread(THREAD)
         self.assertNotIn('private path', str(caught.exception))
 
+    def test_current_verified_package_uses_the_same_receiver_contract(self):
+        self.package['full_name'] = 'OpenAI.Codex_26.1023.6621.0_x64__2p2nqsd0c76g0'
+        self.evidence['attestation']['package'] = dict(self.package)
+        self.assertTrue(navigation.request_open(URI))
+        self.native.library.SendMessageTimeoutW.assert_called_once()
+        self.assertEqual(len(self.native.messages), 1)
+        self.launch.assert_not_called()
+        self.startfile.assert_not_called()
+
     def test_unknown_version_architecture_family_and_unattested_package_fail(self):
         for changed in (dict(full_name='OpenAI.Codex_26.9999.1.0_x64__2p2nqsd0c76g0'),
-                        dict(full_name=navigation._PACKAGE.replace('x64', 'arm64')),
+                        dict(full_name=self.package['full_name'].replace('x64', 'arm64')),
                         dict(family='another.publisher'), dict(root=str(self.package_root / 'elsewhere'))):
             with self.subTest(changed=changed):
                 self.verify.return_value = dict(self.package, **changed)
