@@ -10,7 +10,7 @@ concurrency:
 permissions:
   contents: read
 env:
-  CORE_SELECTOR_REF: 0d220f19256bd3edcca014d14091f66cd64ccfb1
+  CORE_SELECTOR_REF: 8160651a5db707e90f00a3665657d66712481ebc
   TEST_SELECTION_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: '1'

@@ -70,6 +70,28 @@
     },
     {
       "changes": [
+        ".test-selection.json"
+      ],
+      "tests": [
+        "tests/test_connection_integration.py",
+        "tests/test_connection_settings.py",
+        "tests/test_core.py",
+        "tests/test_desktop_launcher.py",
+        "tests/test_diagnose.py",
+        "tests/test_native_proxy.py",
+        "tests/test_queue_history.py",
+        "tests/test_queue_platform.py",
+        "tests/test_queue_resource_seal.py",
+        "tests/test_queue_transport.py",
+        "tests/test_resume_safety.py",
+        "tests/test_review_reset_cli.py",
+        "tests/test_state_readonly.py",
+        "tests/test_usage_client.py"
+      ],
+      "dependency_mode": "supplement"
+    },
+    {
+      "changes": [
         "app.py",
         "app_icons.py",
         "auto_watch.py",
@@ -201,17 +223,42 @@
     "macos": [
       "tests/test_ci_selection.py",
       "tests/test_cli_security.py",
+      "tests/test_connection_integration.py",
+      "tests/test_connection_settings.py",
+      "tests/test_core.py",
       "tests/test_desktop_startup_stdio.py",
       "tests/test_desktop_stdio.py",
-      "tests/test_portable_paths.py"
+      "tests/test_diagnose.py",
+      "tests/test_native_proxy.py",
+      "tests/test_portable_paths.py",
+      "tests/test_queue_history.py",
+      "tests/test_queue_platform.py",
+      "tests/test_queue_resource_seal.py",
+      "tests/test_queue_transport.py",
+      "tests/test_resume_safety.py",
+      "tests/test_review_reset_cli.py",
+      "tests/test_state_readonly.py",
+      "tests/test_usage_client.py"
     ],
     "windows": [
       "tests/test_ci_selection.py",
       "tests/test_cli_security.py",
+      "tests/test_connection_integration.py",
+      "tests/test_connection_settings.py",
+      "tests/test_core.py",
+      "tests/test_desktop_launcher.py",
       "tests/test_desktop_startup_stdio.py",
       "tests/test_desktop_stdio.py",
+      "tests/test_diagnose.py",
+      "tests/test_native_proxy.py",
       "tests/test_portable_paths.py",
+      "tests/test_queue_history.py",
       "tests/test_queue_platform.py",
+      "tests/test_queue_transport.py",
+      "tests/test_resume_safety.py",
+      "tests/test_review_reset_cli.py",
+      "tests/test_state_readonly.py",
+      "tests/test_usage_client.py",
       "tests/test_windows_desktop.py",
       "tests/test_windows_handshake.py",
       "tests/test_windows_no_restart.py",

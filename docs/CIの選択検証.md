@@ -4,7 +4,7 @@
 
 ## 公開前レビュー中の状態
 
-このpatchは上流semantic修正の固定版 `0d220f19256bd3edcca014d14091f66cd64ccfb1` の実blobへpinとsource hashを同期しています。Core固定先は現時点ではlocal commitであり、公開・配送は別のレビューと承認が必要です。`SemanticBoundaryFixtures` はusage_client変更から無関係なplatform/installer検査を選ばないことと、新しい未宣言productファイルをunknownで止めることを要求し、この固定sourceに対してローカル合格しました。
+このpatchは上流semantic修正の固定版 `8160651a5db707e90f00a3665657d66712481ebc` の実blobへpinとsource hashを同期しています。固定commitのremote到達と実体hashを確認して配送し、既定branchへの採用と必要なCI・レビューの成功をmerge前に別途確認します。`SemanticBoundaryFixtures` はusage_client変更から無関係なplatform/installer検査を選ばないことと、新しい未宣言productファイルをunknownで止めることを要求します。
 
 ## planを先に確認する
 
@@ -36,6 +36,8 @@ runtime lockとbuild lockのhash固定導入は維持します。CI接続自体�
 app/usage/queue/desktop等の実startup境界には、生成したfixtureから公式stdioへ接続する `test_desktop_startup_stdio.py` と、relayを検査する `test_desktop_stdio.py` をowner契約で含めます。選択時はWindowsのWinDLL/pipeとMacのPOSIX select/pipe双方で実行します。runtimeにwebsocketをimportするため、両stdio検査のruntime lock導入は省略しません。動的fixtureのため静的graphだけで関係を解決できないことを、テスト除外の理由にしません。新しいproductファイルを追加したときはsource_rootsへの所有宣言も必要です。
 
 CI coordinatorのstdlib-only fixtureもWindows/Macのprimaryで検証します。runnerまたはそのfixtureだけの変更ならLinux3.11/3.13と合わせて4環境ですが、runtime/build依存は導入しません。workflow自体の変更は配布/候補保存条件のintegrationを検証するため、既存のmacOS/Windows packaging checkを追加します。全unitへ戻すことはしません。OS対応は別actorのpackage smokeへ委ねず、runner自身のpath/loader/subprocess境界で確認します。
+
+native一覧はtest名だけで決めず、実pipe/process、junction/symlink/lock、OS別実行file identityとmock境界を確認します。policy変更では、その回帰範囲をsupplement ruleで明示して実OS検査へ送ります。GUIやIPC kernelがmockだけの検査を、実Desktop/実named-pipeの受入成功とは報告しません。
 
 CIは最初にstdlibだけでplanを作り、必要なmatrixを決めてから依存導入を行います。packagingが必要なWindows3.13で、main pushまたは同一repo PRの候補ZIP/版/hashを上流契約のまま保存します。fork PRとmerge_groupには保存しません。新しい `選択した検査の結果` は、planの不要判定とjob失敗・取消・欠測を区別します。既存preflight workflowの名義・公開情報等のgateは変更しません。
 

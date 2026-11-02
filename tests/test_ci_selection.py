@@ -120,6 +120,23 @@ class PolicyWorkflowFixtures(unittest.TestCase):
                          [("ubuntu-latest", "3.11"), ("ubuntu-latest", "3.13"),
                           ("macos-latest", "3.13"), ("windows-latest", "3.13")])
         self.assertTrue(all(c["runtime_required"] for c in cells))
+        # Real I/O/FS contracts from the native audit, not app-word matches.
+        for path in ("tests/test_native_proxy.py", "tests/test_usage_client.py",
+                     "tests/test_connection_integration.py", "tests/test_connection_settings.py",
+                     "tests/test_queue_history.py", "tests/test_review_reset_cli.py",
+                     "tests/test_state_readonly.py", "tests/test_queue_transport.py",
+                     "tests/test_diagnose.py"):
+            for environment in ("macos", "windows"):
+                with self.subTest(path=path, environment=environment):
+                    self.assertEqual(runner.environment_tests(plan([path]), self.policy, environment), [path])
+        for path in ("tests/test_queue_resource_seal.py", "tests/test_queue_platform.py"):
+            self.assertEqual(runner.environment_tests(plan([path]), self.policy, "macos"), [path])
+        self.assertEqual(runner.environment_tests(plan(["tests/test_desktop_launcher.py"]),
+                                                 self.policy, "windows"), ["tests/test_desktop_launcher.py"])
+        for path in ("tests/test_desktop_ipc.py", "tests/test_quota_presentation.py",
+                     "tests/test_desktop_receipt_relay.py", "tests/test_plan_connection_display.py"):
+            for environment in ("macos", "windows"):
+                self.assertEqual(runner.environment_tests(plan([path]), self.policy, environment), [])
 
     def test_coordinator_keeps_native_runner_coverage_without_app_dependencies(self):
         selected = plan(["tests/test_ci_selection.py"])
@@ -131,8 +148,13 @@ class PolicyWorkflowFixtures(unittest.TestCase):
 
     def test_native_scope_is_an_intersection_not_a_whole_suite(self):
         selected = plan(["tests/test_usage_client.py", "tests/test_windows_platform.py"])
-        self.assertEqual(runner.environment_tests(selected, self.policy, "windows"), ["tests/test_windows_platform.py"])
-        self.assertEqual(runner.environment_tests(selected, self.policy, "macos"), [])
+        self.assertEqual(runner.environment_tests(selected, self.policy, "windows"), selected["selected_tests"])
+        self.assertEqual(runner.environment_tests(selected, self.policy, "macos"), ["tests/test_usage_client.py"])
+        state_safety = plan(["tests/test_core.py", "tests/test_resume_safety.py"])
+        for environment in ("windows", "macos"):
+            with self.subTest(environment=environment):
+                self.assertEqual(runner.environment_tests(state_safety, self.policy, environment),
+                                 state_safety["selected_tests"])
 
     def test_package_only_has_one_correct_native_version(self):
         cells = runner.matrix_for(plan(checks=["package-windows"]), self.policy)["include"]
@@ -192,6 +214,12 @@ class SemanticBoundaryFixtures(unittest.TestCase):
         self.assertEqual(set(workflow["checks"]), runner.CHECKS)
         self.assertEqual({c["os"] for c in runner.matrix_for(workflow, policy)["include"]
                           if c["package_required"]}, {"macos-latest", "windows-latest"})
+        policy_change = selector.select_tests(ROOT, [".test-selection.json"], policy)
+        self.assertFalse(policy_change["unresolved"])
+        for environment in ("windows", "macos"):
+            native = runner.environment_tests(policy_change, policy, environment)
+            self.assertIn("tests/test_core.py", native)
+            self.assertIn("tests/test_resume_safety.py", native)
 
     @unittest.skipUnless(os.environ.get("SAFE_SELECTOR_SCRIPT"), "fixed semantic selector required")
     def test_new_product_requires_an_owner_declaration_even_with_a_test_import(self):
