@@ -60,6 +60,16 @@
     },
     {
       "changes": [
+        ".github/workflows/test.yml"
+      ],
+      "checks": [
+        "package-macos",
+        "package-windows"
+      ],
+      "dependency_mode": "supplement"
+    },
+    {
+      "changes": [
         "app.py",
         "app_icons.py",
         "auto_watch.py",

@@ -176,9 +176,22 @@ class SemanticBoundaryFixtures(unittest.TestCase):
         selected = selector.select_tests(ROOT, ["usage_client.py"], policy)
         self.assertFalse(selected["unresolved"], selected["unresolved"])
         self.assertIn("tests/test_usage_client.py", selected["selected_tests"])
+        self.assertEqual(runner.owner_checks(selected, policy), runner.CHECKS)
         for unrelated in ("tests/test_windows_shortcuts.py", "tests/test_windows_runtime_cleanup.py",
                           "tests/test_windows_platform.py", "tests/test_portable_paths.py"):
             self.assertNotIn(unrelated, selected["selected_tests"])
+        component = selector.select_tests(ROOT, ["scripts/run_ci_tests.py"], policy)
+        self.assertFalse(component["unresolved"])
+        self.assertEqual(component["selected_tests"], ["tests/test_ci_selection.py"])
+        self.assertEqual(runner.owner_checks(component, policy), set())
+        self.assertFalse(any(c["package_required"] or c["runtime_required"]
+                             for c in runner.matrix_for(component, policy)["include"]))
+        workflow = selector.select_tests(ROOT, [".github/workflows/test.yml"], policy)
+        self.assertFalse(workflow["unresolved"])
+        self.assertEqual(workflow["selected_tests"], ["tests/test_ci_selection.py"])
+        self.assertEqual(set(workflow["checks"]), runner.CHECKS)
+        self.assertEqual({c["os"] for c in runner.matrix_for(workflow, policy)["include"]
+                          if c["package_required"]}, {"macos-latest", "windows-latest"})
 
     @unittest.skipUnless(os.environ.get("SAFE_SELECTOR_SCRIPT"), "fixed semantic selector required")
     def test_new_product_requires_an_owner_declaration_even_with_a_test_import(self):

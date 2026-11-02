@@ -35,9 +35,9 @@ runtime lockとbuild lockのhash固定導入は維持します。CI接続自体�
 
 app/usage/queue/desktop等の実startup境界には、生成したfixtureから公式stdioへ接続する `test_desktop_startup_stdio.py` と、relayを検査する `test_desktop_stdio.py` をowner契約で含めます。選択時はWindowsのWinDLL/pipeとMacのPOSIX select/pipe双方で実行します。runtimeにwebsocketをimportするため、両stdio検査のruntime lock導入は省略しません。動的fixtureのため静的graphだけで関係を解決できないことを、テスト除外の理由にしません。新しいproductファイルを追加したときはsource_rootsへの所有宣言も必要です。
 
-CI coordinatorのstdlib-only fixtureもWindows/Macのprimaryで検証します。その選択だけならLinux3.11/3.13と合わせて4環境ですが、runtime/build依存は導入しません。OS対応は別actorのpackage smokeへ委ねず、runner自身のpath/loader/subprocess境界で確認します。
+CI coordinatorのstdlib-only fixtureもWindows/Macのprimaryで検証します。runnerまたはそのfixtureだけの変更ならLinux3.11/3.13と合わせて4環境ですが、runtime/build依存は導入しません。workflow自体の変更は配布/候補保存条件のintegrationを検証するため、既存のmacOS/Windows packaging checkを追加します。全unitへ戻すことはしません。OS対応は別actorのpackage smokeへ委ねず、runner自身のpath/loader/subprocess境界で確認します。
 
-CIは最初にstdlibだけでplanを作り、必要なmatrixを決めてから依存導入を行います。新しい `選択した検査の結果` は、planの不要判定とjob失敗・取消・欠測を区別します。既存preflight workflowの名義・公開情報等のgateは変更しません。
+CIは最初にstdlibだけでplanを作り、必要なmatrixを決めてから依存導入を行います。packagingが必要なWindows3.13で、main pushまたは同一repo PRの候補ZIP/版/hashを上流契約のまま保存します。fork PRとmerge_groupには保存しません。新しい `選択した検査の結果` は、planの不要判定とjob失敗・取消・欠測を区別します。既存preflight workflowの名義・公開情報等のgateは変更しません。
 
 ## 検証と限界
 
