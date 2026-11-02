@@ -12,9 +12,9 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SELECTOR_REF = "8160651a5db707e90f00a3665657d66712481ebc"
+SELECTOR_REF = "7194351a90069c4fbcd92e571e2b3114b6b551fa"
 SELECTOR_HASHES = {
-    "local_check.py": "d9cc51df60b27c2ad83744aaedb65cd8a1acf08448f08a8685789e91d4c16f4f",
+    "local_check.py": "61008bd6cba42149725c3d338bfd1ec45722b2de0ca21d9e0cae564c7c3bea45",
     "local_identity_guard.py": "3915411258b286414d62d52444a6ddb803ffe1669aedc44ada546e45be7d516a",
 }
 CHECKS = {"package-macos", "package-windows"}
