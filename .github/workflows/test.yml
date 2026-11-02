@@ -1,4 +1,4 @@
-name: 全OSの回帰検査と配布ビルド
+name: 差分に必要な回帰検査と配布ビルド
 on:
   push:
     branches: [main]
@@ -9,41 +9,98 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
+env:
+  CORE_SELECTOR_REF: 0d220f19256bd3edcca014d14091f66cd64ccfb1
+  TEST_SELECTION_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: '1'
+  SAFE_SELECTOR_SCRIPT: ${{ github.workspace }}/selector/scripts/local_check.py
 jobs:
-  tests:
-    name: 回帰検査 (${{ matrix.os }}, ${{ matrix.python-version }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.11', '3.13']
-    runs-on: ${{ matrix.os }}
+  selection:
+    name: 差分と必要環境を決める
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.plan.outputs.required }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    defaults:
+      run:
+        working-directory: safe-resume
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
+          path: safe-resume
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: nexus-ai-2045/repo-preflight
+          ref: ${{ env.CORE_SELECTOR_REF }}
+          persist-credentials: false
+          path: selector
+      - name: selector固定版を照合
+        run: python -c "import os,subprocess; assert subprocess.check_output(['git','-C','../selector','rev-parse','HEAD'],text=True).strip()==os.environ['CORE_SELECTOR_REF']"
+      - name: 依存導入前に必要な検査と環境を選択
+        id: plan
+        shell: bash
+        run: python scripts/run_ci_tests.py plan --base-ref "$TEST_SELECTION_BASE" --selector-script "$GITHUB_WORKSPACE/selector/scripts/local_check.py" --receipt "$RUNNER_TEMP/safe-selection-plan.json" --github-output "$GITHUB_OUTPUT"
+      - name: 選択根拠を保存
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: safe-selection-plan
+          path: ${{ runner.temp }}/safe-selection-plan.json
+          if-no-files-found: error
+  tests:
+    name: 回帰検査 (${{ matrix.os }}, ${{ matrix.python-version }})
+    needs: selection
+    if: needs.selection.outputs.required == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.selection.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: safe-resume
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: safe-resume
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: nexus-ai-2045/repo-preflight
+          ref: ${{ env.CORE_SELECTOR_REF }}
+          persist-credentials: false
+          path: selector
+      - name: selector固定版を照合
+        run: python -c "import os,subprocess; assert subprocess.check_output(['git','-C','../selector','rev-parse','HEAD'],text=True).strip()==os.environ['CORE_SELECTOR_REF']"
       - name: 接続検査用の固定依存を導入
+        if: matrix.runtime_required
         run: python -m pip install --require-hashes -r packaging/requirements-runtime.lock
       - name: 配布用の固定依存を導入
-        if: matrix.python-version == '3.13' && runner.os != 'Linux'
+        if: matrix.package_required
         run: python -m pip install --require-hashes -r packaging/requirements-build.lock
-      - name: 回帰検査
-        run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q core.py app.py desktop_bridge.py watch.py diagnose.py diagnostics.py native_proxy.py connection_settings.py cli_security.py desktop_launcher.py desktop_stdio.py
+      - name: 選択したファイルだけunittestで実行
+        shell: bash
+        run: python scripts/run_ci_tests.py run --base-ref "$TEST_SELECTION_BASE" --selector-script "$GITHUB_WORKSPACE/selector/scripts/local_check.py" --environment "${{ matrix.environment }}" --receipt "$RUNNER_TEMP/safe-selection-${{ matrix.environment }}-${{ matrix.python-version }}.json"
       - name: macOS配布物を生成
-        if: matrix.python-version == '3.13' && runner.os == 'macOS'
+        if: matrix.package_required && runner.os == 'macOS'
         run: bash packaging/build-macos.sh
       - name: Windows配布物を生成
-        if: matrix.python-version == '3.13' && runner.os == 'Windows'
+        if: matrix.package_required && runner.os == 'Windows'
         shell: pwsh
         env:
           PY_PYTHON: '3.13'
         run: ./packaging/build-windows.ps1
       - name: Windows受入候補の版とハッシュを記録
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python-version == '3.13' && runner.os == 'Windows'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.package_required && runner.os == 'Windows'
         shell: pwsh
         env:
           PY_PYTHON: '3.13'
@@ -61,7 +118,7 @@ jobs:
             purpose = '実機受入候補（未署名・安定版ではありません）'
           } | ConvertTo-Json | Set-Content -LiteralPath 'release/windows-acceptance.json' -Encoding utf8NoBOM
       - name: Windows受入候補を保存（安定版リリースではありません）
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python-version == '3.13' && runner.os == 'Windows'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.package_required && runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: CodexSafeResume-Windows-${{ github.sha }}
@@ -71,3 +128,31 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+      - name: 実行と未実行の根拠を保存
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: safe-selection-${{ matrix.environment }}-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/safe-selection-${{ matrix.environment }}-${{ matrix.python-version }}.json
+          if-no-files-found: error
+  selected-checks:
+    name: 選択した検査の結果
+    if: always()
+    needs: [selection, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 不要と失敗を区別して回収
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.selection.result }}
+          TEST_RESULT: ${{ needs.tests.result }}
+          TEST_REQUIRED: ${{ needs.selection.outputs.required }}
+        run: |
+          test "$PLAN_RESULT" = success
+          if test "$TEST_REQUIRED" = true; then
+            test "$TEST_RESULT" = success
+          elif test "$TEST_REQUIRED" = false; then
+            test "$TEST_RESULT" = skipped
+          else
+            exit 1
+          fi

@@ -1,0 +1,222 @@
+{
+  "schema": "test-selection-policy/v1",
+  "source_roots": [
+    "app.py",
+    "app_icons.py",
+    "auto_watch.py",
+    "cli_security.py",
+    "connection_settings.py",
+    "core.py",
+    "desktop_binding.py",
+    "desktop_bridge.py",
+    "desktop_ipc.py",
+    "desktop_launcher.py",
+    "desktop_stdio.py",
+    "diagnose.py",
+    "diagnostics.py",
+    "native_proxy.py",
+    "plan_metadata.py",
+    "queue_attestation.py",
+    "queue_bridge.py",
+    "queue_history.py",
+    "queue_platform.py",
+    "queue_reconcile.py",
+    "queue_resource_seal.py",
+    "queue_state.py",
+    "queue_transport.py",
+    "quota_presentation.py",
+    "quota_widgets.py",
+    "usage_client.py",
+    "watch.py",
+    "windows_desktop.py",
+    "windows_entry.py",
+    "windows_package.py",
+    "windows_platform.py",
+    "windows_runtime.py"
+  ],
+  "test_roots": [
+    "tests"
+  ],
+  "test_patterns": [
+    "test_*.py"
+  ],
+  "code_suffixes": [
+    ".py"
+  ],
+  "rules": [
+    {
+      "changes": [
+        ".github/workflows/test.yml",
+        ".test-selection.json",
+        "scripts/run_ci_tests.py",
+        "docs/CIの選択検証.md",
+        "CONTRIBUTING.md",
+        "tests/test_ci_selection.py"
+      ],
+      "tests": [
+        "tests/test_ci_selection.py"
+      ],
+      "dependency_mode": "mapped"
+    },
+    {
+      "changes": [
+        "app.py",
+        "app_icons.py",
+        "auto_watch.py",
+        "cli_security.py",
+        "connection_settings.py",
+        "core.py",
+        "desktop_*.py",
+        "native_proxy.py",
+        "plan_metadata.py",
+        "queue_*.py",
+        "quota_*.py",
+        "usage_client.py",
+        "watch.py"
+      ],
+      "tests": [
+        "tests/test_desktop_startup_stdio.py",
+        "tests/test_desktop_stdio.py"
+      ]
+    },
+    {
+      "changes": [
+        "packaging/build-icons.py"
+      ],
+      "tests": [
+        "tests/test_app_icons.py"
+      ],
+      "checks": [
+        "package-macos",
+        "package-windows"
+      ],
+      "dependency_mode": "mapped"
+    },
+    {
+      "changes": [
+        "packaging/*macos*"
+      ],
+      "tests": [
+        "tests/test_portable_paths.py"
+      ],
+      "checks": [
+        "package-macos"
+      ],
+      "dependency_mode": "mapped"
+    },
+    {
+      "changes": [
+        "packaging/*windows*"
+      ],
+      "tests": [
+        "tests/test_windows_package.py",
+        "tests/test_windows_shortcuts.py",
+        "tests/test_windows_runtime_cleanup.py",
+        "tests/test_portable_paths.py"
+      ],
+      "checks": [
+        "package-windows"
+      ],
+      "dependency_mode": "mapped"
+    },
+    {
+      "changes": [
+        "packaging/requirements-runtime.lock"
+      ],
+      "tests": [
+        "tests/test_app_icons.py",
+        "tests/test_desktop_stdio.py",
+        "tests/test_desktop_receipt_relay.py",
+        "tests/test_connection_integration.py"
+      ],
+      "checks": [
+        "package-macos",
+        "package-windows"
+      ],
+      "dependency_mode": "mapped"
+    },
+    {
+      "changes": [
+        "packaging/requirements-build*"
+      ],
+      "tests": [
+        "tests/test_windows_package.py",
+        "tests/test_app_icons.py"
+      ],
+      "checks": [
+        "package-macos",
+        "package-windows"
+      ],
+      "dependency_mode": "mapped"
+    },
+    {
+      "changes": [
+        "README.md",
+        "docs/Windows接続の検証.md",
+        "docs/再開の安全契約.md",
+        "docs/実機受入手順.md",
+        "docs/接続方式の再調査.md",
+        "docs/接続設定.md",
+        "docs/検証記録.md",
+        "docs/表示状態の遷移点検.md",
+        "docs/開発と検証.md",
+        "SECURITY.md",
+        "PREFLIGHT.md",
+        ".repo-preflight/**",
+        ".github/workflows/preflight.yml"
+      ],
+      "tests": [
+        "tests/test_preflight_contract.py",
+        "tests/test_ui_labels.py",
+        "tests/test_windows_shortcuts.py"
+      ],
+      "dependency_mode": "mapped"
+    },
+    {
+      "changes": [
+        "LICENSE",
+        "packaging/README-portable-ja.md"
+      ],
+      "tests": [
+        "tests/test_portable_paths.py"
+      ],
+      "checks": [
+        "package-macos",
+        "package-windows"
+      ],
+      "dependency_mode": "mapped"
+    }
+  ],
+  "native_tests": {
+    "macos": [
+      "tests/test_ci_selection.py",
+      "tests/test_cli_security.py",
+      "tests/test_desktop_startup_stdio.py",
+      "tests/test_desktop_stdio.py",
+      "tests/test_portable_paths.py"
+    ],
+    "windows": [
+      "tests/test_ci_selection.py",
+      "tests/test_cli_security.py",
+      "tests/test_desktop_startup_stdio.py",
+      "tests/test_desktop_stdio.py",
+      "tests/test_portable_paths.py",
+      "tests/test_queue_platform.py",
+      "tests/test_windows_desktop.py",
+      "tests/test_windows_handshake.py",
+      "tests/test_windows_no_restart.py",
+      "tests/test_windows_package.py",
+      "tests/test_windows_platform.py",
+      "tests/test_windows_runtime.py",
+      "tests/test_windows_runtime_cleanup.py",
+      "tests/test_windows_session.py",
+      "tests/test_windows_shortcuts.py",
+      "tests/test_windows_startup_caller.py"
+    ]
+  },
+  "stdlib_only_tests": [
+    "tests/test_ci_selection.py",
+    "tests/test_preflight_contract.py",
+    "tests/test_windows_shortcuts.py"
+  ]
+}
