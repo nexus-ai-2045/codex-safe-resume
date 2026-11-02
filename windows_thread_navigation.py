@@ -13,6 +13,7 @@ from windows_platform import process_identity
 _PACKAGES = frozenset({
     'OpenAI.Codex_26.1021.3705.0_x64__2p2nqsd0c76g0',
     'OpenAI.Codex_26.1023.6621.0_x64__2p2nqsd0c76g0',
+    'OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0',
 })
 _CLASS = 'Chrome_MessageWindow'
 _HWND_MESSAGE = -3

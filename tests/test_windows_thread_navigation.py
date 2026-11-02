@@ -180,6 +180,16 @@ class WindowsThreadNavigation(unittest.TestCase):
         self.launch.assert_not_called()
         self.startfile.assert_not_called()
 
+    def test_261027_package_candidate_uses_the_same_receiver_contract(self):
+        self.package['full_name'] = 'OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0'
+        self.evidence['attestation']['package'] = dict(self.package)
+        self.assertTrue(navigation.request_open(URI))
+        self.verify.assert_called_once_with(1234, str(self.executable))
+        self.native.library.SendMessageTimeoutW.assert_called_once()
+        self.assertEqual(len(self.native.messages), 1)
+        self.launch.assert_not_called()
+        self.startfile.assert_not_called()
+
     def test_unknown_version_architecture_family_and_unattested_package_fail(self):
         for changed in (dict(full_name='OpenAI.Codex_26.9999.1.0_x64__2p2nqsd0c76g0'),
                         dict(full_name=self.package['full_name'].replace('x64', 'arm64')),
