@@ -400,6 +400,19 @@ def _server_role(server):
     raise ValueError(_ERROR)
 
 
+def _darwin_desktop_parent(desktop):
+    from desktop_binding import desktop_bundle
+    path = Path(desktop['executable'])
+    if path.parent.name != 'MacOS' or path.parent.parent.name != 'Contents':
+        return False
+    identifier = desktop_bundle(desktop['pid'])
+    if (type(identifier) is not str or len(identifier) > 255
+            or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9-]*)+', identifier) is None
+            or _identity(desktop['pid']) != desktop):
+        raise ValueError(_ERROR)
+    return identifier == 'com.openai.codex'
+
+
 def _backend_holder(users, known_server=None):
     found = []
     names = {'codex.exe', 'codex-code-mode-host.exe'} if _platform() == 'win32' else {'codex', 'codex-code-mode-host'}
@@ -414,7 +427,7 @@ def _backend_holder(users, known_server=None):
                 if _platform() == 'win32':
                     desktop_parent = path.name.casefold() == 'chatgpt.exe'
                 else:
-                    desktop_parent = path.parent.name == 'MacOS' and path.parent.parent.name == 'Contents'
+                    desktop_parent = _darwin_desktop_parent(desktop)
                 if desktop_parent and (server == known_server or _server_role(server) == 'app-server'):
                     found.append(identity)
         except _WindowsProcessExited:
