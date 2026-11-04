@@ -1651,6 +1651,7 @@ def main():
     a = sub.add_parser('diagnose', help='画面を開かず起動環境を診断する')
     a.add_argument('--json', action='store_true', help='機械可読の診断結果')
     for command in ('scan', 'dry-run', 'list'): sub.add_parser(command)
+    sub.add_parser('export-state', help='保存済み状態を変更せずJSONで出力する（WALは未対応）')
     for command in ('enable', 'disable'):
         a = sub.add_parser(command); a.add_argument('id')
     a = sub.add_parser('quota-test'); a.add_argument('id'); a.add_argument('failure_turn'); a.add_argument('reset_at', type=int); a.add_argument('--limit', choices=['5h', 'weekly'], default='5h')
@@ -1661,6 +1662,10 @@ def main():
     review.add_argument('--dry-run', action='store_true',
                         help='idleの選び直し前に、状態・選択・世代・可否だけを変更せず確認する')
     args = p.parse_args(['gui'] if len(sys.argv) == 1 else None)
+    if args.cmd == 'export-state':
+        from core import export_state
+        print(json.dumps(export_state()))
+        return 0
     if args.cmd == 'diagnose':
         from diagnose import main as diagnose_main
         return diagnose_main(['--json'] if args.json else [])

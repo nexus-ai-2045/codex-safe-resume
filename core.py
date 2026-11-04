@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import contextlib
+import datetime
 import os
 import pathlib
 import re
@@ -154,9 +155,14 @@ def check_id(s):
     return str(uuid.UUID(s))
 
 
-def safe_state_dir(home=None, *, create=True):
+def _state_path(home=None):
     p = pathlib.Path(home or os.environ.get('CODEX_RESUME_HOME', pathlib.Path.home()/'.codex-safe-resume')).expanduser()
     reject_links(p)
+    return p
+
+
+def safe_state_dir(home=None, *, create=True):
+    p = _state_path(home)
     if create:
         p.mkdir(parents=True, exist_ok=True, mode=0o700)
     elif not p.is_dir():
@@ -167,7 +173,9 @@ def safe_state_dir(home=None, *, create=True):
     return p
 
 
-def connection(home=None, *, readonly=False):
+def connection(home=None, *, readonly=False, no_sidecars=False):
+    if no_sidecars and not readonly:
+        raise ValueError('補助ファイルなしの接続は読取り専用で指定してください')
     folder=safe_state_dir(home, create=not readonly); path=folder/'resume.sqlite3'
     reject_links(path)
     if path.is_symlink(): raise RuntimeError('状態データのリンクは使用できません')
@@ -182,6 +190,9 @@ def connection(home=None, *, readonly=False):
     if os.name == 'posix' and not readonly: path.chmod(0o600)
     try:
         db.execute('PRAGMA busy_timeout=5000')
+        if no_sidecars:
+            # WALの共有メモリを作成・更新せず、対応できないDBは読取りを拒否する。
+            db.execute('PRAGMA locking_mode=EXCLUSIVE')
         version = db.execute('PRAGMA user_version').fetchone()[0]
         if version > 4:
             raise RuntimeError('状態データの版が新しいため読み込みを停止しました')
@@ -418,6 +429,46 @@ def sync(db, discovered):
 def list_threads(db):
     db.row_factory=sqlite3.Row
     return [dict(x) for x in db.execute('SELECT * FROM threads ORDER BY updated_at DESC, title')]
+
+
+def export_state(home=None):
+    """保存済みの状態だけを出力する。同期・移行・WALの補助ファイル作成は行わない。"""
+    result = {
+        'schema_version': 1,
+        'observed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'provider': 'codex',
+        'status': 'unknown',
+        'reason': None,
+        'conversations': [],
+    }
+    try:
+        path = _state_path(home) / 'resume.sqlite3'
+        if not path.exists():
+            result.update(status='missing', reason='database_missing')
+            return result
+        with contextlib.closing(connection(home, readonly=True, no_sidecars=True)) as db:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(threads)')}
+            if not {'id', 'title', 'state', 'enabled', 'generation', 'updated_at'} <= columns:
+                result['reason'] = 'schema_incompatible'
+                return result
+            conversations = []
+            for row in list_threads(db):
+                if (not isinstance(row['id'], str) or not isinstance(row['title'], str)
+                        or not isinstance(row['state'], str) or not row['state']
+                        or type(row['enabled']) is not int or row['enabled'] not in (0, 1)
+                        or type(row['generation']) is not int or row['generation'] < 0):
+                    result['reason'] = 'invalid_conversation'
+                    return result
+                conversations.append({
+                    'id': row['id'], 'title': row['title'], 'state': row['state'],
+                    'enabled': bool(row['enabled']), 'generation': row['generation'],
+                })
+        result.update(status='ok', conversations=conversations)
+    except sqlite3.DatabaseError:
+        result['reason'] = 'readonly_snapshot_unavailable'
+    except (OSError, RuntimeError):
+        result['reason'] = 'database_unavailable'
+    return result
 
 
 def enable(db,thread_id,flag):
