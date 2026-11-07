@@ -6,8 +6,8 @@
 
 1. 既存Issueと実コードを確認し、変更する責務と受入条件を定義する。
 2. 不具合を再現する失敗テスト（RED）を先に追加する。
-3. 最小実装でGREENにし、共通化・リファクタリング後に全テストを実行する。
-4. `python -m unittest discover -s tests -v`、`python -m compileall -q app.py core.py desktop_bridge.py watch.py` を実行する。
+3. 最小実装でGREENにし、変更した責務と実際の依存先を検証する。
+4. [差分の選択検証](docs/CIの選択検証.md)でplanを先に確認し、必要な環境で選択されたファイルだけunittestを実行する。未知の対応は停止し、全件実行へ戻さない。
 5. [repo-preflight](https://github.com/nexus-ai-2045/repo-preflight) の `readiness_scan.py` で公開情報・履歴・文書整合性を確認する。`blocked` または `tool_error` のままマージしない。
 6. PRのHEADに対するCI全ジョブ・レビューの指摘・未解決スレッドを確認し、マージ後にも再確認する。
 

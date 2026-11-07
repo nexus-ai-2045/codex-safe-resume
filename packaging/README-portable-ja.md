@@ -31,7 +31,7 @@
 
 ## `Windows`実機受入候補の取得
 
-`GitHub Actions`の`「全OSの回帰検査と配布ビルド」`で、対象`main`または同一リポジトリ内の`PR`の検査がすべて成功した実行を開きます。`Artifacts`の `CodexSafeResume-Windows-<実行対象SHA>` を取得して展開すると、`Portable ZIP`と `windows-acceptance.json` が入っています。保持期間は14日です。外部の`fork`からの`PR`と`merge_group`では候補を保存しません。`PR`では実行対象の`merge SHA`と候補先端の`SHA`を区別し、実機試験前に[版とhashの照合手順](../docs/開発と検証.md#Windows実機受入候補の保存と照合)を確認してください。
+`GitHub Actions`の`「差分に必要な回帰検査と配布ビルド」`で、配布検査が選択され、対象`main`または同一リポジトリ内の`PR`の検査がすべて成功した実行を開きます。`Artifacts`の `CodexSafeResume-Windows-<実行対象SHA>` を取得して展開すると、`Portable ZIP`と `windows-acceptance.json` が入っています。保持期間は14日です。stdlib-onlyのCI接続変更では配布検査を起動せず、外部の`fork`からの`PR`と`merge_group`では候補を保存しません。`PR`では実行対象の`merge SHA`と候補先端の`SHA`を区別し、実機試験前に[版とhashの照合手順](../docs/開発と検証.md#Windows実機受入候補の保存と照合)を確認してください。
 
 `JSON`の `source_sha` が対象の実行版と一致し、`candidate_sha` が試験する候補、`source_tree` がその候補のソースツリーと一致することを確認します。`Portable ZIP`の`SHA256`が `sha256` と一致してから`ZIP`を展開します。`PowerShell 7`では `Get-FileHash -LiteralPath .\CodexSafeResume-Windows-Portable.zip -Algorithm SHA256` で照合できます。照合が取れない候補や期限切れ候補は使いません。
 
