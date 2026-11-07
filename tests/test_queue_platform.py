@@ -1,6 +1,8 @@
+import contextlib
 import os
 import pathlib
 import plistlib
+import subprocess
 import types
 import tempfile
 import sys
@@ -38,6 +40,9 @@ class QueuePlatformTests(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
+        security = mock.patch('queue_attestation._security', return_value=b'fixture-acl')
+        security.start()
+        self.addCleanup(security.stop)
 
     def test_selects_requested_home_without_global_singleton(self):
         result = platform.desktop_for_home(self.home)
@@ -351,6 +356,102 @@ class QueuePlatformTests(unittest.TestCase):
             with self.assertRaises((ValueError, RuntimeError)):
                 platform._darwin_cli(desktop, server, [server, desktop], platform.DARWIN_TEAM)
 
+    def test_file_only_darwin_verifier_does_not_query_processes_or_stage_files(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run, \
+                mock.patch('desktop_binding.desktop_bundle') as binding, \
+                mock.patch.object(platform, '_identity') as identity, \
+                mock.patch('windows_runtime.stage_cli') as stage:
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('--deep', run.call_args_list[0].args[0])
+        binding.assert_not_called()
+        identity.assert_not_called()
+        stage.assert_not_called()
+
+    def test_darwin_signature_deadline_is_finite_thirty_seconds_without_weakening_checks(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        self.assertTrue(run.call_args_list)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs['timeout'], 30)
+            self.assertIn('--strict', call.args[0])
+            self.assertIn(platform.DARWIN_TEAM, call.args[0][4])
+        self.assertIn('--deep', run.call_args_list[0].args[0])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=subprocess.TimeoutExpired('codesign', 30)) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        run.assert_called_once()
+
+    def test_file_only_darwin_verifier_rejects_signature_seal_acl_and_escape(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=1)):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        with mock.patch.object(platform, 'validate_location', side_effect=ValueError('ACL')), \
+                mock.patch.object(platform.subprocess, 'run') as signature:
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+            signature.assert_not_called()
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)):
+            for target in (self.home/'codex', bundle/'Contents/../codex'):
+                with self.subTest(target=target):
+                    with self.assertRaises(ValueError):
+                        platform.verify_darwin_cli_files(bundle, [target], platform.DARWIN_TEAM)
+            envelope = bundle/'Contents/_CodeSignature/CodeResources'
+            envelope.write_bytes(plistlib.dumps({'files2': {cli.relative_to(bundle/'Contents').as_posix(): {'hash2': b'wrong'*6+b'xx'}}}))
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_cli_changed_during_codesign(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        def replace_after_signature(*args, **kwargs):
+            cli.write_bytes(b'updated during verification')
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=replace_after_signature):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_acl_changed_during_codesign(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        security = [b'initial-acl']
+        def change_acl(*args, **kwargs):
+            security[0] = b'changed-acl'
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(platform, 'validate_location', side_effect=lambda path: path), \
+                mock.patch('queue_attestation._security', side_effect=lambda path: security[0]), \
+                mock.patch.object(platform.subprocess, 'run', side_effect=change_acl):
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
+    def test_file_only_darwin_verifier_rejects_bad_publisher_and_bundle_identity(self):
+        bundle, desktop, server, host = self.darwin_nested_fixture()
+        cli = pathlib.Path(server['executable'])
+        with self.assertRaises(ValueError):
+            platform.verify_darwin_cli_files(bundle, [cli], 'OTHERTEAM')
+        plist = bundle/'Contents/Info.plist'
+        plist.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.example.other',
+                                         'CFBundleExecutable': 'Codex'}))
+        with self.assertRaises(ValueError):
+            platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+        for executable in ('../outside', '/absolute', '', None):
+            plist.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.openai.codex',
+                                             'CFBundleExecutable': executable or ''}))
+            with self.assertRaises(ValueError):
+                platform.verify_darwin_cli_files(bundle, [cli], platform.DARWIN_TEAM)
+
     def test_restart_manager_inventory_releases_session_on_error(self):
         native = types.SimpleNamespace(**{name: mock.Mock(return_value=0) for name in ('RmStartSession', 'RmRegisterResources', 'RmGetList', 'RmEndSession')})
         native.RmRegisterResources.return_value = 5
@@ -481,6 +582,92 @@ class QueueAttestationTests(unittest.TestCase):
         patch = mock.patch.object(self.attestation, '_security', return_value=b'owner-and-acl')
         patch.start()
         self.addCleanup(patch.stop)
+
+    @contextlib.contextmanager
+    def windows_attribute_view(self, *, path_attributes=0x40020):
+        original_lstat = pathlib.Path.lstat
+        original_fstat = os.fstat
+        values = {'file': 0x20, 'directory': 0x10}
+
+        def with_attributes(info, attributes):
+            fields = {name: getattr(info, name) for name in dir(info)
+                      if name.startswith('st_')}
+            return types.SimpleNamespace(**(fields | {'st_file_attributes': attributes}))
+
+        def lstat(path, *args, **kwargs):
+            info = original_lstat(path, *args, **kwargs)
+            if path == self.file:
+                attributes = path_attributes() if callable(path_attributes) else path_attributes
+                return with_attributes(info, attributes)
+            return info
+
+        def attributes(path):
+            value = values['file' if pathlib.Path(path) == self.file else 'directory']
+            return value() if callable(value) else value
+
+        query = mock.Mock(side_effect=attributes)
+        kernel = types.SimpleNamespace(GetFileAttributesW=query)
+        with mock.patch.object(self.attestation.sys, 'platform', 'win32'), mock.patch.object(
+                self.attestation.ctypes, 'WinDLL', return_value=kernel, create=True), mock.patch.object(
+                pathlib.Path, 'lstat', lstat), mock.patch.object(
+                self.attestation.os, 'fstat', side_effect=lambda fd: with_attributes(original_fstat(fd), 0x20)):
+            yield values, query
+
+    def test_windows_enumeration_attributes_do_not_reject_identical_file(self):
+        with self.windows_attribute_view() as (_, query):
+            proof = self.attestation.capture([self.file])
+            self.assertTrue(self.attestation.matches(proof))
+            self.assertEqual(proof['paths'][str(self.file)][0][-1], 0x20)
+            query.assert_any_call(str(self.file))
+
+    def test_windows_attribute_lookup_failure_is_not_replaced_with_lstat(self):
+        for invalid in (0xffffffff, None):
+            with self.subTest(invalid=invalid), self.windows_attribute_view() as (values, query):
+                values['file'] = invalid
+                with self.assertRaises(ValueError):
+                    self.attestation.capture([self.file])
+                query.assert_any_call(str(self.file))
+
+    def test_windows_canonical_directory_reparse_attribute_is_rejected(self):
+        with self.windows_attribute_view() as (values, query):
+            values['directory'] = 0x410
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.root)
+            query.assert_any_call(str(self.root))
+
+    def test_windows_canonical_file_reparse_attribute_is_rejected(self):
+        with self.windows_attribute_view() as (values, query):
+            values['file'] = 0x420
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+            query.assert_any_call(str(self.file))
+
+    def test_windows_attribute_api_exception_has_only_the_fixed_error(self):
+        with self.windows_attribute_view() as (_, query):
+            query.side_effect = OSError('private-source-detail')
+            with self.assertRaises(ValueError) as caught:
+                self.attestation._snapshot(self.file)
+            self.assertEqual(str(caught.exception), self.attestation._ERROR)
+            self.assertIsNone(caught.exception.__cause__)
+
+    def test_windows_raw_reparse_attribute_is_rejected(self):
+        with self.windows_attribute_view(path_attributes=0x420):
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+
+    def test_windows_final_raw_reparse_attribute_is_rejected(self):
+        sequence = iter((0x40020, 0x420))
+        with self.windows_attribute_view(path_attributes=lambda: next(sequence)):
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+
+    def test_windows_canonical_attribute_change_during_read_is_rejected(self):
+        with self.windows_attribute_view() as (values, query):
+            sequence = iter((0x20, 0x21))
+            values['file'] = lambda: next(sequence)
+            with self.assertRaises(ValueError):
+                self.attestation._snapshot(self.file)
+            self.assertEqual(query.call_count, 2)
 
     def test_unchanged_attestation_is_read_only(self):
         proof = self.attestation.capture([self.file], exact_directories=[self.root])

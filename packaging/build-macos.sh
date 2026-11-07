@@ -23,8 +23,9 @@ with tempfile.TemporaryDirectory() as directory:
     result = subprocess.run([sys.argv[1], 'diagnose'], env=env, timeout=60)
     raise SystemExit(result.returncode)
 PY_SMOKE
-"$PYTHON" -m PyInstaller --noconfirm --clean --console --onefile --name CodexSafeResumeBridge --distpath dist/bridge --workpath build/bridge --specpath build desktop_launcher.py >> "$BUILD_LOG" 2>&1 || { echo 'Desktop接続用プログラムをビルドできません。' >&2; exit 1; }
-cp dist/bridge/CodexSafeResumeBridge "$APP/Contents/MacOS/CodexSafeResumeBridge"
+# .app内では既存のContents/Frameworksを共有し、起動時の自己展開を避ける。
+"$PYTHON" -m PyInstaller --noconfirm --clean --console --onedir --contents-directory Frameworks --name CodexSafeResumeBridge --distpath dist/bridge --workpath build/bridge --specpath build desktop_launcher.py >> "$BUILD_LOG" 2>&1 || { echo 'Desktop接続用プログラムをビルドできません。' >&2; exit 1; }
+cp dist/bridge/CodexSafeResumeBridge/CodexSafeResumeBridge "$APP/Contents/MacOS/CodexSafeResumeBridge"
 chmod 755 "$APP/Contents/MacOS/CodexSafeResumeBridge"
 # macOS 26向けの一時的な旧UI互換設定。性能・クラッシュ対策とは別。
 # Appleの仕様上、SDK 27以降でビルドするとこのキーは無視される。
@@ -40,6 +41,19 @@ PY_UI_COMPAT
 # No trusted publisher identity or notarization; ad-hoc only.
 codesign --force --deep --sign - "$APP" >> "$BUILD_LOG" 2>&1 || { echo '署名を付けられません。' >&2; exit 1; }
 codesign --verify --deep --strict "$APP" >> "$BUILD_LOG" 2>&1 || { echo '署名を検査できません。' >&2; exit 1; }
+"$PYTHON" - "$APP/Contents/MacOS/CodexSafeResumeBridge" >> "$BUILD_LOG" 2>&1 <<'PY_HELPER_SMOKE' || { echo '補助プログラムを3秒以内に起動できません。' >&2; exit 1; }
+import os, pathlib, subprocess, sys, tempfile
+with tempfile.TemporaryDirectory() as directory:
+    state = pathlib.Path(directory) / 'unused-state'
+    env = dict(os.environ, CODEX_RESUME_HOME=str(state),
+               CODEX_HOME=str(pathlib.Path(directory) / 'unused-codex'),
+               CSR_WINDOWS_ORDER_FREE='1')
+    result = subprocess.run([sys.argv[1], '--open-chat',
+        '11111111-1111-4111-8111-111111111111', 'nan'], env=env,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    assert result.returncode == 0 and result.stdout == b'failed\n' and not result.stderr
+    assert not state.exists()
+PY_HELPER_SMOKE
 source packaging/macos-common.sh
 csr_safe_path "$PWD/release" || exit 1
 mkdir -p release

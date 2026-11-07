@@ -82,14 +82,21 @@ class QueueBridge:
     def __exit__(self, *args):
         self._close()
 
+    def _close_reader(self):
+        ipc, self.ipc = self.ipc, None
+        try:
+            if ipc is not None:
+                ipc.__exit__(None, None, None)
+            return True
+        except Exception:
+            self.connected = False
+            self.evidence = None
+            return False
+
     def _close(self):
         try:
-            if self.ipc is not None:
-                self.ipc.__exit__(None, None, None)
-        except Exception:
-            pass
+            self._close_reader()
         finally:
-            self.ipc = None
             self.connected = False
             self.evidence = None
 
@@ -107,7 +114,7 @@ class QueueBridge:
 
     def capabilities(self):
         try:
-            live = bool(self.connected and self.ipc is not None and self.evidence is not None
+            live = bool(self.connected and self.evidence is not None
                         and queue_platform.revalidate(self.evidence))
         except Exception:
             live = False
@@ -128,6 +135,9 @@ class QueueBridge:
         try:
             thread = check_id(thread_id)
             self.prepare_thread(thread)
+            if self.ipc is None:
+                self.ipc = DesktopIpc(self.evidence, timeout=min(self.timeout, 30))
+                self.ipc.__enter__()
             value = self.ipc.snapshot(thread)
             candidate = self.history.candidate(thread)
             if (value.get('id') != thread or value.get('observation_verified') is not True
@@ -140,6 +150,9 @@ class QueueBridge:
             return value
         except Exception:
             raise BridgeError(_ERROR) from None
+        finally:
+            if not self._close_reader():
+                raise BridgeError(_ERROR) from None
 
     def quota(self):
         try:

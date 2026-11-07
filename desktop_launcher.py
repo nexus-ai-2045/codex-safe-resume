@@ -107,6 +107,11 @@ def _fallback_stdio(config, argv, reason):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == '--open-chat':
+        from thread_navigation import mac_open_chat
+        status = mac_open_chat(argv[1], argv[2]) if len(argv) == 3 else 'failed'
+        print(status, flush=True)
+        return 0
     if (argv and argv[0] == '--manage-desktop') or os.environ.get('CSR_WINDOWS_ORDER_FREE') == '1':
         raise ValueError('Codexを起動し直す接続方式は利用できません')
     with closing(connection()) as db:

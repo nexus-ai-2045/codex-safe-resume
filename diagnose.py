@@ -72,7 +72,7 @@ def render_report(result):
               'missing': '未導入', 'not_created': '未作成',
               'native_proxy_required': '公式CLIによる接続先の確認が必要です（未検証）',
               'permissions_review_required': '権限の確認が必要です'}
-    lines = ['Codex Safe Resume — 実機接続前の診断（読み取り専用）']
+    lines = ['Codex Safe Resume - 実機接続前の診断（読み取り専用）']
     for key, value in result['checks'].items():
         lines.append(f"{labels.get(key, '追加の検査')}: {states.get(value, '確認が必要です')}")
     lines.append('実際の再開送信と5時間・週次枠の解除検証は、未実施です。')

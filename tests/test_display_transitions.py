@@ -437,12 +437,12 @@ class DisplayTransitions(unittest.TestCase):
         for variable, value in ((self.gui.view_filter, 'すべて'),
                                 (self.gui.filter, 'すべて'), (self.gui.search, '')):
             variable.get.return_value = value
-        for view, expected in (('すべて', {tid, blocked, idle}), ('要確認', {blocked}),
-                               ('再開待ち', {tid})):
+        for view, expected in (('すべて', {tid, blocked, idle}), ('確認が必要', {blocked}),
+                               ('解除待ち・再開中', {tid})):
             self.gui.view_filter.get.return_value = view
             self.gui.render_rows()
             self.assertEqual(set(items), expected)
-        for field, value in (('view_filter', '要確認'), ('search', '一致しない検索'),
+        for field, value in (('view_filter', '確認が必要'), ('search', '一致しない検索'),
                              ('filter', '完了')):
             with self.subTest(field=field):
                 self.gui.view_filter.get.return_value = 'すべて'

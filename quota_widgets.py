@@ -19,8 +19,9 @@ class QuotaCards(ttk.Frame):
         if self.columns == columns:
             return
         self.columns = columns
-        self.columnconfigure(0, weight=1, uniform='quota')
-        self.columnconfigure(1, weight=1 if columns == 2 else 0, uniform='quota')
+        self.columnconfigure(0, weight=1, uniform='quota' if columns == 2 else '')
+        self.columnconfigure(1, weight=1 if columns == 2 else 0,
+                             uniform='quota' if columns == 2 else '')
         for index, item in enumerate(self.items):
             item['frame'].grid(row=index // columns, column=index % columns,
                                sticky='nsew', padx=(0, 6) if columns == 2 and index % 2 == 0 else 0,
@@ -40,8 +41,7 @@ class QuotaCards(ttk.Frame):
                 for row in range(3):
                     label = ttk.Label(frame, style='Panel.TLabel', justify='left', wraplength=280)
                     label.grid(row=row if row == 0 else row + 1, column=0, sticky='ew')
-                    label.bind('<Configure>', lambda event: event.widget.configure(
-                        wraplength=event.width) if event.width > 1 else None)
+                    label.bind('<Configure>', self._wrap_label)
                     labels.append(label)
                 gauge = ttk.Progressbar(frame, mode='determinate', maximum=100, length=80)
                 gauge.grid(row=1, column=0, sticky='ew', pady=3)
@@ -60,3 +60,9 @@ class QuotaCards(ttk.Frame):
             else:
                 gauge.configure(value=card['remaining_percent'])
                 gauge.grid()
+
+    def _wrap_label(self, event):
+        if event.width > 1:
+            width = max(1, event.width - 4)
+            if int(event.widget.cget('wraplength')) != width:
+                event.widget.configure(wraplength=width)

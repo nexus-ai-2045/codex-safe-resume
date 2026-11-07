@@ -73,12 +73,21 @@ public static class CsrVerifiedRemoval {
     private struct AttributeTag { public uint Attributes; public uint Tag; }
     [StructLayout(LayoutKind.Sequential)]
     private struct Disposition { public byte DeleteFile; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileInformation {
+        public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh,
+            WriteLow, WriteHigh, Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint mode, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError=true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int kind, out AttributeTag info, uint size);
     [DllImport("kernel32.dll", SetLastError=true)]
     private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, ref Disposition info, uint size);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInformation info);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern uint GetFileType(SafeFileHandle handle);
     private static SafeFileHandle Open(string path, bool directory, bool remove) {
         uint access = directory ? 0x80u : 0x80000000u;
         if (remove) access |= 0x10000u;
@@ -103,6 +112,23 @@ public static class CsrVerifiedRemoval {
         try { return new FileStream(handle, FileAccess.Read); }
         catch { handle.Dispose(); throw; }
     }
+    public static FileStream OpenGuiLease(string path) {
+        // share=0 is FileShare.None; OPEN_REPARSE_POINT refuses link substitution.
+        var handle = CreateFileW(path, 0xC0000000u, 0u, IntPtr.Zero, 4u, 0x00200000u, IntPtr.Zero);
+        if (handle.IsInvalid) {
+            int error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new Win32Exception(error);
+        }
+        try {
+            FileInformation info;
+            if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (GetFileType(handle) != 1u || (info.Attributes & 0x410u) != 0 || info.Links != 1u ||
+                info.SizeHigh != 0u || info.SizeLow > 1u)
+                throw new IOException("起動ロックのリンクまたは種類を確認できません。");
+            return new FileStream(handle, FileAccess.ReadWrite);
+        } catch { handle.Dispose(); throw; }
+    }
     public static void MarkDelete(SafeFileHandle handle) {
         var info = new Disposition { DeleteFile = 1 };
         if (!SetFileInformationByHandle(handle, 4, ref info, 1)) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -111,6 +137,40 @@ public static class CsrVerifiedRemoval {
 '@
 }
 function Remove-CsrSettings([string]$Root) {
+    Assert-CsrSafePath $Root
+    $rootPath = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if (-not [IO.Path]::GetFileName($rootPath)) { throw '設定保存先が不正です。' }
+    $lockPath = $rootPath + '.gui.lock'
+    $pins = [Collections.Generic.List[object]]::new()
+    $lease = $null
+    Initialize-CsrVerifiedRemoval
+    try {
+        # 祖先の名前を固定し、sibling lockも設定保存先も同じ場所を指し続ける。
+        $ancestors = [Collections.Generic.List[string]]::new()
+        $cursor = [IO.Path]::GetDirectoryName($rootPath)
+        while ($cursor) {
+            $ancestors.Insert(0, $cursor)
+            $cursor = [IO.Path]::GetDirectoryName($cursor)
+        }
+        foreach ($directory in $ancestors) {
+            $pins.Add([CsrVerifiedRemoval]::OpenDirectory($directory, $false))
+        }
+        Assert-CsrSafePath $lockPath
+        try { $lease = [CsrVerifiedRemoval]::OpenGuiLease($lockPath) }
+        catch { throw '起動ロックが使用中または不正のため設定を保持しました。' }
+        Assert-CsrSafePath $lockPath
+        Assert-CsrSafePath $rootPath
+        _Remove-CsrSettingsLocked $rootPath $lease
+    } finally {
+        if ($null -ne $lease) { $lease.Dispose() }
+        for ($index = $pins.Count - 1; $index -ge 0; $index--) { $pins[$index].Dispose() }
+    }
+}
+# 内部専用。公開入口Remove-CsrSettingsがsibling lockを保持して呼び出す。
+function _Remove-CsrSettingsLocked([string]$Root, [IO.FileStream]$GuiLease) {
+    if ($null -eq $GuiLease -or $GuiLease.SafeFileHandle.IsClosed -or $GuiLease.SafeFileHandle.IsInvalid) {
+        throw '設定削除の起動ロックがありません。'
+    }
     Assert-CsrSafePath $Root
     if (-not (Test-Path -LiteralPath $Root)) { return }
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { throw '設定保存先が不正です。' }
