@@ -14,9 +14,7 @@ import unittest
 @unittest.skipUnless(os.name == 'nt' and shutil.which('pwsh'), 'Windows PowerShell 7 cleanup')
 class RuntimeCleanupTests(unittest.TestCase):
     def setUp(self):
-        fixture_root = Path(__file__).resolve().parents[2] / 'owned-fixture-temp'
-        fixture_root.mkdir(exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=fixture_root)
+        self.temp = tempfile.TemporaryDirectory(prefix='csr-cleanup-')
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name) / 'state'
         self.runtime = self.home / 'runtime' / ('a' * 64)

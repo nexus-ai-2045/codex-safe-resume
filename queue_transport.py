@@ -255,8 +255,10 @@ class QueueTransport:
             if not isinstance(initialized.get('userAgent'), str) or not initialized['userAgent']:
                 raise ValueError('invalid_initialize')
             self._write(process, {'method': 'initialized', 'params': {}}, deadline, writers)
-            if before_send is not None and before_send() is not True:
-                return outcome
+            if before_send is not None:
+                if before_send() is not True:
+                    return outcome
+                deadline = time.monotonic() + self.timeout
             if time.monotonic() >= deadline:
                 return outcome
             dispatched = True

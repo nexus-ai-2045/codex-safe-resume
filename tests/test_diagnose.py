@@ -98,6 +98,23 @@ class DiagnosticTests(unittest.TestCase):
             self.assertNotIn(td, render_report(result))
 
 class StartupDiagnosticTests(unittest.TestCase):
+    def test_text_diagnosis_can_be_redirected_to_cp932_and_keeps_exit_status(self):
+        for state, expected in (('available', 0), ('missing', 1)):
+            with self.subTest(state=state):
+                output = io.BytesIO()
+                stream = io.TextIOWrapper(output, encoding='cp932', errors='strict')
+                try:
+                    with patch('diagnose.inspection', return_value={'checks': {'tkinter': state}}), \
+                            patch.object(sys, 'argv', ['app.py', 'diagnose']), \
+                            patch.object(sys, 'stdout', stream):
+                        self.assertEqual(app.main(), expected)
+                    stream.flush()
+                    text = output.getvalue().decode('cp932')
+                    self.assertIn('実機接続前の診断', text)
+                    self.assertIn('画面ライブラリ:', text)
+                finally:
+                    stream.detach()
+
     def test_tcl_initialization_failure_is_missing_without_private_details(self):
         fake_tk = SimpleNamespace(Tcl=Mock(side_effect=RuntimeError('private-tcl-path')))
         with tempfile.TemporaryDirectory() as td, patch.dict(sys.modules, {'tkinter': fake_tk}):

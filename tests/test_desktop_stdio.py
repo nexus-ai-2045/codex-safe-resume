@@ -65,7 +65,7 @@ class DesktopStdioTests(unittest.TestCase):
             writer.write(payload)
         return reader, writer
 
-    def proxy(self, action):
+    def proxy(self, action, *, skip_utf8_validation=False):
         client, peer = socket.socketpair()
         self.sockets.extend([client, peer])
         peer.settimeout(5)
@@ -85,7 +85,7 @@ class DesktopStdioTests(unittest.TestCase):
                 peer.sendall(b'HTTP/1.1 101 Switching Protocols\r\n'
                              b'Upgrade: websocket\r\nConnection: Upgrade\r\n'
                              b'Sec-WebSocket-Accept: ' + accept + b'\r\n\r\n')
-                server = websocket.WebSocket()
+                server = websocket.WebSocket(skip_utf8_validation=skip_utf8_validation)
                 server.sock = peer
                 server.connected = True
                 action(server, peer)
@@ -357,7 +357,8 @@ class DesktopStdioTests(unittest.TestCase):
         def action(server, peer):
             observed.append(server.recv())
             received.set()
-        raw = self.proxy(action)
+        # recv still strictly decodes UTF-8; avoid its duplicate Python scan.
+        raw = self.proxy(action, skip_utf8_validation=True)
         reader, writer = self.input_pipe()
         def produce():
             # Keep stdin open until the full frame is observed. EOF cancels the
@@ -432,6 +433,37 @@ class DesktopStdioTests(unittest.TestCase):
                 relay('/trusted/codex', stdin=reader, stdout=ZeroWriter())
         self.assertEqual(caught.exception.reason, 'stdout_write')
         self.assertEqual(raw.fileno(), -1)
+
+    def test_output_failure_reason_survives_sender_cleanup_error(self):
+        for reason in ('websocket_frame', 'stdout_write'):
+            with self.subTest(reason=reason):
+                class Raw:
+                    def close(self):
+                        pass
+                class WS:
+                    def connect(self, *args, **kwargs):
+                        pass
+                    def settimeout(self, value):
+                        pass
+                    def recv_data(self):
+                        payload = b'[]' if reason == 'websocket_frame' else b'{}'
+                        return websocket.ABNF.OPCODE_TEXT, payload
+                    def abort(self):
+                        raise OSError(10057, 'private-cleanup-detail')
+                class ZeroWriter(io.BytesIO):
+                    def write(self, value):
+                        return 0
+                def wait_for_stop(reader, size, stopped):
+                    if not stopped.wait(1):
+                        raise AssertionError('output did not stop')
+                    return None
+                with patch('desktop_stdio.NativeProxySocket', return_value=Raw()), patch(
+                        'desktop_stdio._BoundedWebSocket', return_value=WS()), patch(
+                        'desktop_stdio._InputReader.read', new=wait_for_stop):
+                    with self.assertRaises(DesktopStdioError) as caught:
+                        relay('/fixture/private-path', stdin=io.BytesIO(), stdout=ZeroWriter())
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertNotIn('private', str(caught.exception))
 
     def test_input_failure_reason_survives_websocket_abort_error(self):
         aborted = threading.Event()

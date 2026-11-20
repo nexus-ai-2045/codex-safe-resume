@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import desktop_ipc
 import queue_bridge
+from tests.test_desktop_ipc import CLIENT, OWNER, Stream, state
 
 THREAD = '01a161ab-e82d-7631-a8aa-d33c77b2128e'
 TURN = '01a161ab-e82d-7631-a8aa-d33c77b21281'
@@ -67,6 +69,191 @@ class QueueBridgeTests(unittest.TestCase):
             self.assertTrue(cap['guarded_admission'])
             self.assertFalse(cap['safe_admission'])
         self.ipc.__exit__.assert_called_once()
+
+    def reader(self):
+        reader = Mock()
+        reader.__enter__ = Mock(return_value=reader)
+        reader.__exit__ = Mock()
+        reader.snapshot.return_value = live()
+        return reader
+
+    def test_snapshot_discards_reader_with_queued_patch_before_next_observation(self):
+        first, second = self.reader(), self.reader()
+        first.snapshot.side_effect = [live(), ValueError('unknown_change')]
+        with patch('queue_bridge.DesktopIpc', side_effect=[first, second]) as factory:
+            with self.bridge() as bridge:
+                self.assertEqual(bridge.snapshot(THREAD), live())
+                self.assertTrue(bridge.connected)
+                self.assertIs(bridge.evidence, self.evidence)
+                self.assertTrue(bridge.capabilities()['guarded_admission'])
+                self.assertEqual(bridge.snapshot(THREAD), live())
+                first.__exit__.assert_called_once()
+                self.assertIsNone(bridge.ipc)
+                second.__exit__.assert_called_once()
+                self.assertEqual(factory.call_count, 2)
+                for invocation in factory.call_args_list:
+                    self.assertIs(invocation.args[0], self.evidence)
+                    self.assertEqual(invocation.kwargs, {'timeout': 15})
+        first.snapshot.assert_called_once_with(THREAD)
+        second.snapshot.assert_called_once_with(THREAD)
+        first.__enter__.assert_called_once()
+        second.__enter__.assert_called_once()
+        first.__exit__.assert_called_once()
+        second.__exit__.assert_called_once()
+        self.transport.check.assert_called_once()
+
+    def test_snapshot_exception_closes_reader_and_next_snapshot_uses_fresh_reader(self):
+        first, second = self.reader(), self.reader()
+        first.snapshot.side_effect = ValueError('unknown_change')
+        with patch('queue_bridge.DesktopIpc', side_effect=[first, second]):
+            with self.bridge() as bridge:
+                with self.assertRaises(queue_bridge.BridgeError):
+                    bridge.snapshot(THREAD)
+                first.__exit__.assert_called_once()
+                self.assertEqual(bridge.snapshot(THREAD), live())
+        first.__exit__.assert_called_once()
+        second.__exit__.assert_called_once()
+
+    def buffered_patch_stream(self):
+        stream = Stream(state(turns=[{'turnId': TURN, 'status': 'failed',
+                                     'error': {'codexErrorInfo': 'usageLimitExceeded'}}]))
+        write = stream.write
+
+        def enqueue_patch(payload, deadline):
+            write(payload, deadline)
+            if stream.sent[-1]['method'] == 'thread-follower-load-complete-history':
+                stream.push({'type': 'broadcast', 'method': 'thread-stream-state-changed',
+                             'sourceClientId': OWNER, 'version': 11, 'targetClientIds': [CLIENT],
+                             'params': {'conversationId': THREAD, 'hostId': 'local',
+                                        'change': {'type': 'patch', 'revision': 7, 'patches': []}}})
+
+        stream.write = enqueue_patch
+        return stream
+
+    def test_buffered_patch_fixture_fails_closed_when_native_reader_is_reused(self):
+        stream = self.buffered_patch_stream()
+        with patch('desktop_ipc._connect', return_value=stream):
+            with desktop_ipc.DesktopIpc(self.evidence) as reader:
+                self.assertEqual(reader.snapshot(THREAD), live())
+                with self.assertRaises(desktop_ipc.DesktopIpcError):
+                    reader.snapshot(THREAD)
+        self.assertTrue(stream.closed)
+
+    def test_snapshot_uses_fresh_native_reader_despite_buffered_patch(self):
+        first, second = self.buffered_patch_stream(), self.buffered_patch_stream()
+        with patch('queue_bridge.DesktopIpc', desktop_ipc.DesktopIpc), \
+                patch('desktop_ipc._connect', side_effect=[first, second]) as connect:
+            with self.bridge() as bridge:
+                self.assertEqual(bridge.snapshot(THREAD), live())
+                self.assertEqual(bridge.snapshot(THREAD), live())
+                self.assertEqual(connect.call_count, 2)
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+
+    def test_fresh_reader_enter_failure_is_closed_and_next_reader_is_fresh(self):
+        first, broken, third = self.reader(), self.reader(), self.reader()
+        broken.__enter__.side_effect = ValueError('origin')
+        with patch('queue_bridge.DesktopIpc', side_effect=[first, broken, third]):
+            with self.bridge() as bridge:
+                bridge.snapshot(THREAD)
+                with self.assertRaises(queue_bridge.BridgeError):
+                    bridge.snapshot(THREAD)
+                broken.__exit__.assert_called_once()
+                broken.snapshot.assert_not_called()
+                self.assertEqual(bridge.snapshot(THREAD), live())
+        for reader in (first, broken, third):
+            reader.__exit__.assert_called_once()
+
+    def test_initial_reader_enter_failure_is_closed_and_never_reads(self):
+        self.ipc.__enter__.side_effect = ValueError('owner')
+        bridge = self.bridge()
+        with self.assertRaises(queue_bridge.BridgeError):
+            bridge.__enter__()
+        bridge._close()
+        self.ipc.__exit__.assert_called_once()
+        self.ipc.snapshot.assert_not_called()
+        self.assertFalse(bridge.connected)
+        self.assertIsNone(bridge.evidence)
+
+    def test_snapshot_close_failure_is_detached_and_bridge_close_is_idempotent(self):
+        first, second = self.reader(), self.reader()
+        first.__exit__.side_effect = ValueError('close')
+        with patch('queue_bridge.DesktopIpc', side_effect=[first, second]) as factory:
+            with self.bridge() as bridge:
+                with self.assertRaises(queue_bridge.BridgeError):
+                    bridge.snapshot(THREAD)
+                self.assertIsNone(bridge.ipc)
+                self.assertFalse(bridge.connected)
+                self.assertFalse(bridge.capabilities()['desktop_binding'])
+                self.assertFalse(bridge.capabilities()['guarded_admission'])
+                with self.assertRaises(queue_bridge.BridgeError):
+                    bridge.snapshot(THREAD)
+                with self.assertRaises(queue_bridge.QueueNotStarted):
+                    bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
+                bridge._close()
+                bridge._close()
+            self.assertIsNone(bridge.ipc)
+        factory.assert_called_once()
+        first.__exit__.assert_called_once()
+        second.__enter__.assert_not_called()
+        self.transport.enqueue.assert_not_called()
+
+    def test_snapshot_read_and_close_failure_disable_admission(self):
+        self.ipc.snapshot.side_effect = ValueError('snapshot')
+        self.ipc.__exit__.side_effect = ValueError('close')
+        with self.bridge() as bridge:
+            with self.assertRaises(queue_bridge.BridgeError):
+                bridge.snapshot(THREAD)
+            self.assertFalse(bridge.connected)
+            self.assertFalse(bridge.capabilities()['guarded_admission'])
+            with self.assertRaises(queue_bridge.QueueNotStarted):
+                bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
+        self.ipc.__exit__.assert_called_once()
+        self.transport.enqueue.assert_not_called()
+
+    def test_initial_reader_enter_and_close_failure_leave_bridge_disabled(self):
+        self.ipc.__enter__.side_effect = ValueError('owner')
+        self.ipc.__exit__.side_effect = ValueError('close')
+        bridge = self.bridge()
+        with self.assertRaises(queue_bridge.BridgeError):
+            bridge.__enter__()
+        bridge._close()
+        self.assertIsNone(bridge.ipc)
+        self.assertFalse(bridge.capabilities()['guarded_admission'])
+        with self.assertRaises(queue_bridge.QueueNotStarted):
+            bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
+        self.ipc.__exit__.assert_called_once()
+        self.transport.enqueue.assert_not_called()
+
+    def test_context_close_failure_disables_bridge_and_is_idempotent(self):
+        self.ipc.__exit__.side_effect = ValueError('close')
+        bridge = self.bridge()
+        bridge.__enter__()
+        bridge.__exit__(None, None, None)
+        bridge.__exit__(None, None, None)
+        self.assertIsNone(bridge.ipc)
+        self.assertFalse(bridge.capabilities()['guarded_admission'])
+        with self.assertRaises(queue_bridge.BridgeError):
+            bridge.snapshot(THREAD)
+        with self.assertRaises(queue_bridge.QueueNotStarted):
+            bridge.send_once(THREAD, TURN, attempt_id=ATTEMPT)
+        self.ipc.__exit__.assert_called_once()
+        self.transport.enqueue.assert_not_called()
+
+    def test_snapshot_closes_reader_on_loaded_history_and_binding_rejection(self):
+        for target in ('loaded', 'history', 'revalidate'):
+            with self.subTest(target=target):
+                reader = self.reader()
+                with patch('queue_bridge.DesktopIpc', return_value=reader):
+                    with self.bridge() as bridge:
+                        if target == 'history':
+                            self.history.candidate.side_effect = ValueError('history')
+                        with patch('queue_bridge.queue_platform.loaded', return_value=target != 'loaded'), \
+                                patch('queue_bridge.queue_platform.revalidate', return_value=target != 'revalidate'):
+                            with self.assertRaises(queue_bridge.BridgeError):
+                                bridge.snapshot(THREAD)
+                        reader.__exit__.assert_called_once()
+                self.history.candidate.side_effect = None
 
     def test_prepare_config_confirms_only_connection_never_operator_consent(self):
         config = queue_bridge.prepare_config(self.home)

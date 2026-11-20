@@ -105,12 +105,19 @@ def _reject_constant(_: str) -> None:
 
 
 def _response(incoming: queue.Queue[bytes | None], failed: threading.Event,
-              ident: int, deadline: float) -> dict:
+              ident: int, deadline: float, cancel: threading.Event | None = None) -> dict:
     for _ in range(_MAX_NOTIFICATIONS + 1):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or failed.is_set():
-            raise ValueError('response unavailable')
-        line = incoming.get(timeout=remaining)
+        while True:
+            if cancel is not None and cancel.is_set():
+                raise UsageReadError(_ERROR)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or failed.is_set():
+                raise ValueError('response unavailable')
+            try:
+                line = incoming.get(timeout=min(remaining, 0.1))
+                break
+            except queue.Empty:
+                continue
         if line is None:
             raise ValueError('stream closed')
         message = json.loads(line.decode('utf-8'), parse_constant=_reject_constant)
@@ -173,24 +180,32 @@ def _close(process: subprocess.Popen | None, reader: threading.Thread | None) ->
 
 
 def read_limits(executable: str | os.PathLike[str], timeout: float = 8, *,
-                peer_reply: object = None) -> dict[str, object]:
+                peer_reply: object = None,
+                cancel: threading.Event | None = None) -> dict[str, object]:
     """検証したCLIから利用枠を一度読み、識別情報を除いた表示用結果を返す。
 
     timeoutはstdio交換全体の期限。配置検査と終了処理は各自の有限期限を持つ。
+    cancelは表示要求の中止通知。応答待ちを中断しても所有childとreaderを回収する。
     primary/secondaryは位置であり、5時間枠・週次枠の意味はduration_minutesで読む。
     省略・nullのduration/resetはNoneのまま保持し、過去のresetも推測で更新しない。
     peer_replyは共有接続の読取り結果。識別子はメモリ内で比較し、一致の真偽だけ返す。
     一致は取得元同士の今回の観測であり、Desktop本人確認・送信許可ではない。
     """
+    def check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise UsageReadError(_ERROR)
+
     process = None
     reader = None
     result = None
     failed = False
     try:
+        check_cancel()
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                 or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError('invalid timeout')
         path = validate_location(executable)
+        check_cancel()
         deadline = time.monotonic() + timeout
         options = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                        stderr=subprocess.DEVNULL, shell=False, bufsize=0)
@@ -205,12 +220,14 @@ def read_limits(executable: str | os.PathLike[str], timeout: float = 8, *,
         reader.start()
         _send(process.stdin, {'id': 1, 'method': 'initialize', 'params': {
             'clientInfo': {'name': 'codex_safe_resume_usage', 'version': '0.5.0'}}})
-        initialized = _response(incoming, reader_failed, 1, deadline)
+        initialized = _response(incoming, reader_failed, 1, deadline, cancel)
         if not isinstance(initialized.get('userAgent'), str) or not initialized['userAgent']:
             raise ValueError('invalid initialization')
+        check_cancel()
         _send(process.stdin, {'method': 'initialized', 'params': {}})
         _send(process.stdin, {'id': 2, 'method': 'account/rateLimits/read', 'params': {}})
-        reply = _response(incoming, reader_failed, 2, deadline)
+        reply = _response(incoming, reader_failed, 2, deadline, cancel)
+        check_cancel()
         result = summarize_limits(reply)
         result.update(peer_status='not_provided', peer_limits=None, account_match=None)
         if peer_reply is not None:

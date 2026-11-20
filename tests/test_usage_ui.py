@@ -33,6 +33,38 @@ class UsageUi(unittest.TestCase):
         self.gui.usage_status = Mock()
         self.gui.connection_note = Mock()
 
+    def test_each_display_request_owns_a_fresh_cancel_event(self):
+        events = []
+        def read(config, *, cancel):
+            events.append(cancel)
+            return sample()
+        with patch('app.read_usage_status', side_effect=read):
+            self.gui.request_usage()
+            self.gui.usage_thread.join(1)
+            self.gui.usage_cancel.set()
+            self.gui.drain_usage()
+            self.gui.request_usage()
+            self.gui.usage_thread.join(1)
+        self.assertEqual(len(events), 2)
+        self.assertIsNot(events[0], events[1])
+        self.assertTrue(events[0].is_set())
+        self.assertFalse(events[1].is_set())
+
+    def test_cancel_after_peer_read_does_not_verify_or_spawn_display_cli(self):
+        cancel = threading.Event()
+        bridge = Mock()
+        bridge.__enter__ = Mock(return_value=bridge)
+        bridge.__exit__ = Mock(return_value=False)
+        bridge.quota.side_effect = lambda: cancel.set()
+        with patch('app.validate_executable'), \
+                patch('app.DesktopBridge', return_value=bridge), \
+                patch('app.usage_executable') as resolve, patch('app.read_limits') as read:
+            with self.assertRaises(app.UsageReadError):
+                app.read_usage_status({'mode': 'prepared'}, cancel=cancel)
+        resolve.assert_not_called()
+        read.assert_not_called()
+        bridge.__exit__.assert_called_once()
+
     def test_weekly_primary_is_never_displayed_as_five_hours(self):
         text = app.usage_text(sample())
         self.assertIn('1週間枠: 制限あり・残り75%', text)
@@ -85,7 +117,7 @@ class UsageUi(unittest.TestCase):
     def test_only_one_usage_request_runs_at_a_time(self):
         release = threading.Event()
         self.addCleanup(release.set)
-        def read(_):
+        def read(_, **kwargs):
             release.wait(1)
             return sample()
         with patch('app.usage_executable', return_value='fixture'), patch('app.read_limits', side_effect=read) as reader:
@@ -129,11 +161,115 @@ class UsageUi(unittest.TestCase):
         self.gui.db.close.assert_called_once()
         self.gui.root.destroy.assert_called_once()
 
-    def test_changed_pinned_cli_never_falls_back_to_another_source(self):
-        with patch('app.validate_executable', side_effect=ValueError), patch('app.validate_location') as location:
+    def test_valid_pin_remains_preferred_without_official_bundle_lookup(self):
+        config = {'mode': 'prepared', 'sha256': 'saved'}
+        pinned = Path('/saved/official/codex')
+        with patch('app.validate_executable', return_value=pinned) as validate, \
+                patch('queue_platform.verify_darwin_cli_files', create=True) as verify:
+            self.assertEqual(app.usage_executable(config), pinned)
+        validate.assert_called_once_with(config, require_confirmation=False)
+        verify.assert_not_called()
+
+    def test_stale_pin_and_unconfigured_mac_use_same_verified_fixed_bundle(self):
+        bundle = Path('/Applications/ChatGPT.app')
+        cli = bundle / 'Contents/Resources/codex-cli/bin/codex'
+        for config in ({'mode': 'prepared', 'executable': '/arbitrary/codex', 'sha256': 'old'}, {}):
+            with self.subTest(configured=bool(config)):
+                original = dict(config)
+                with patch('app.sys.platform', 'darwin'), \
+                        patch('app.validate_executable', side_effect=ValueError('stale pin')), \
+                        patch('app.validate_location', side_effect=AssertionError('unverified source')), \
+                        patch('queue_platform.verify_darwin_cli_files', create=True) as verify, \
+                        patch('app.monitor_once') as sender:
+                    self.assertEqual(app.usage_executable(config), cli)
+                verify.assert_called_once_with(bundle, [cli], '2DC432GLL2')
+                sender.assert_not_called()
+                self.assertEqual(config, original)
+
+    def test_invalid_official_bundle_does_not_rehash_or_execute_saved_path(self):
+        with patch('app.sys.platform', 'darwin'), \
+                patch('app.validate_executable', side_effect=ValueError('stale')) as validate, \
+                patch('queue_platform.verify_darwin_cli_files', side_effect=ValueError('signature'), create=True), \
+                patch('app.read_limits') as read:
+            with self.assertRaises(ValueError):
+                app.read_usage_status({'mode': 'prepared', 'executable': '/arbitrary/codex'})
+        self.assertEqual(validate.call_count, 2)
+        read.assert_not_called()
+
+    def test_changed_pin_never_uses_a_windows_fallback(self):
+        with patch('app.sys.platform', 'win32'), \
+                patch('app.validate_executable', side_effect=ValueError), \
+                patch('queue_platform.verify_darwin_cli_files', create=True) as verify:
             with self.assertRaises(ValueError):
                 app.usage_executable({'mode': 'prepared'})
-        location.assert_not_called()
+        verify.assert_not_called()
+
+    def test_unconfigured_windows_has_no_resolver_or_staging(self):
+        with patch('app.sys.platform', 'win32'), \
+                patch('queue_platform.verify_darwin_cli_files', create=True) as verify, \
+                patch('windows_runtime.stage_cli') as stage:
+            with self.assertRaises(ValueError):
+                app.usage_executable({})
+        verify.assert_not_called()
+        stage.assert_not_called()
+
+    def test_display_fallback_preserves_original_peer_config_and_send_stop(self):
+        config = {'mode': 'prepared', 'executable': '/saved/codex', 'sha256': 'old'}
+        original = dict(config)
+        result = dict(sample(), peer_status='not_provided', account_match=None)
+        before = self.db.total_changes
+        with patch('app.sys.platform', 'darwin'), \
+                patch('app.validate_executable', side_effect=ValueError('stale')), \
+                patch('queue_platform.verify_darwin_cli_files', create=True) as verify, \
+                patch('app.DesktopBridge', side_effect=ValueError('old pin')) as peer, \
+                patch('app.read_limits', return_value=result) as read, \
+                patch('app.monitor_once') as sender:
+            actual = app.read_usage_status(config)
+        verify.assert_called_once()
+        peer.assert_not_called()
+        read.assert_called_once_with(Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'), peer_reply=None, cancel=None)
+        self.assertEqual(actual['desktop_connection'], 'unavailable')
+        self.assertIsNone(actual['account_match'])
+        self.assertIn('自動送信: 停止', app.connection_text(config, actual))
+        self.assertEqual(config, original)
+        self.assertEqual(self.db.total_changes, before)
+        sender.assert_not_called()
+
+    def test_valid_pin_is_checked_before_peer_then_resolved_once_before_cli(self):
+        config = {'mode': 'prepared'}
+        order = []
+        probe = Mock()
+        probe.__enter__ = Mock(return_value=probe)
+        probe.__exit__ = Mock(return_value=False)
+        probe.quota.side_effect = lambda: order.append('peer') or {'rateLimits': {}}
+        def resolve(_):
+            order.append('final-resolve')
+            return Path('/fixture/codex')
+        def validate(*args, **kwargs):
+            order.append('saved-pin')
+            return Path('/fixture/codex')
+        def read(*args, **kwargs):
+            order.append('read-cli')
+            return dict(sample(), peer_status='read', account_match=None)
+        with patch('app.validate_executable', side_effect=validate) as saved, \
+                patch('app.DesktopBridge', return_value=probe) as peer, \
+                patch('app.usage_executable', side_effect=resolve) as resolver, \
+                patch('app.read_limits', side_effect=read):
+            app.read_usage_status(config)
+        self.assertEqual(order, ['saved-pin', 'peer', 'final-resolve', 'read-cli'])
+        saved.assert_called_once_with(config, require_confirmation=False)
+        resolver.assert_called_once_with(config)
+        peer.assert_called_once_with(config=config, transport_only=True, timeout=3)
+
+    def test_unconfigured_display_verifies_bundle_once_and_never_contacts_peer(self):
+        with patch('app.sys.platform', 'darwin'), \
+                patch('queue_platform.verify_darwin_cli_files') as verify, \
+                patch('app.DesktopBridge') as peer, \
+                patch('app.read_limits', return_value=dict(sample(), account_match=None)):
+            result = app.read_usage_status({})
+        verify.assert_called_once()
+        peer.assert_not_called()
+        self.assertEqual(result['desktop_connection'], 'not_configured')
 
 
 if __name__ == '__main__': unittest.main()
