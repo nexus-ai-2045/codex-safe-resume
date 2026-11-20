@@ -51,10 +51,11 @@ python3 -m pip install --require-hashes -r packaging/requirements-build.lock
 ### テスト
 
 ```bash
-python3 -m pip install --require-hashes -r packaging/requirements-runtime.lock
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py core.py desktop_bridge.py watch.py tests
+python3 scripts/run_ci_tests.py plan --base-ref origin/main \
+  --selector-script /path/to/fixed-core/scripts/local_check.py --receipt /path/to/plan.json
 ```
+
+必要な環境・依存をplanで確認してから、選択されたファイルだけを検証します。[差分の選択検証](docs/CIの選択検証.md)に、固定版selector、実行方法、未知の変更で止める境界を記載しています。このpatchと固定先Coreの配送は公開前レビュー中です。
 
 ### 画面の操作
 
