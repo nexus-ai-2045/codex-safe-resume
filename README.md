@@ -48,6 +48,16 @@ python3 -m pip install --require-hashes -r packaging/requirements-build.lock
 
 接続の準備と確認事項は[接続設定](docs/接続設定.md)を参照してください。 接続変更後などで「要確認」になった対象は、`Desktop`で状態を確認し、「設定」→「確認して選び直す（試行履歴は保持）」で選択解除状態へ戻してから監視対象を選び直せます。同じ失敗への過去の試行記録は保持します。
 
+### 保存済み状態の読取り
+
+保存済みの監視状態は、`python3 -B app.py export-state`でJSONとして読み取れます。
+保存先は既存の`CODEX_RESUME_HOME`設定を使います。チャット検出・同期・DB移行・再開送信・別CLIの起動は行いません。
+`schema_version`、UTCの`observed_at`、`provider: codex`と、保存済みチャットの`id`・`title`・`state`・`enabled`・`generation`だけを出力します。本文・プロジェクトパス・接続設定は含みません。これはSafe Resumeが最後に保存した状態であり、現在のCodex全履歴や自然な利用枠解除の受入結果ではありません。
+
+`status: ok`は読取り成功、`missing`と`reason: database_missing`は保存先またはDBが未作成、`unknown`は安全に読めない状態です。`unknown`の空配列を「会話なし」と扱わないでください。既存DB・フォルダー・権限を修復・作成しません。
+通常のWAL形式ではSQLiteの読取り専用接続でも補助ファイルを作る場合があるため、この出力はWALの読取りを拒否し、`reason: readonly_snapshot_unavailable`を返します。稼働中WALの安全なスナップショット取得は未対応です。出力のためにDB形式を変更しないでください。
+移行前の列不足は`schema_incompatible`、保存値の型や範囲の不整合は`invalid_conversation`、権限・リンク・将来版など接続検査の拒否は`database_unavailable`として扱います。`readonly_snapshot_unavailable`には破損・ロック等のSQLite読取りエラーも含みます。JSONを返した場合の終了コードは0なので、利用側は必ず`status`を確認してください。
+
 ### テスト
 
 ```bash
